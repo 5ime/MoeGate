@@ -31,8 +31,10 @@ def _make_request(method: str, url: str, data: Optional[bytes] = None, timeout: 
     Raises:
         FRPConfigError: 请求失败时抛出
     """
+    if not bool(getattr(config, "ENABLE_FRP", False)):
+        raise FRPConfigError("FRP 当前未启用", 403)
     if not config.FRP_SERVER_ADDR:
-        raise FRPConfigError("FRP服务器地址未配置", 500)
+        raise FRPConfigError("FRP服务器地址未配置", 400)
     
     if timeout is None:
         timeout = config.REQUEST_TIMEOUT

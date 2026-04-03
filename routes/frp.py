@@ -141,11 +141,24 @@ def _require_frp_enabled_for_mutation():
     return None
 
 
+def _short_circuit_when_frp_disabled(payload: Dict[str, object], message: str = "FRP 当前未启用"):
+    """FRP 未启用时的统一短路响应。"""
+    if not config.ENABLE_FRP:
+        base = {"enabled": False}
+        base.update(payload or {})
+        return success(base, message, 200)
+    return None
+
+
 @bp.route("/frp/proxies", methods=["GET"])
 @require_api_key
 @log_request("获取FRP代理列表")
 @rate_limit(max_per_min=30)
 def get_frp_proxies():
+    disabled = _short_circuit_when_frp_disabled({"proxies": [], "count": 0})
+    if disabled:
+        return disabled
+
     def _do():
         proxies = list_proxies()
         return {"proxies": proxies, "count": len(proxies)}
@@ -177,6 +190,11 @@ def create_frp_proxy():
 @log_request("获取FRP代理详情")
 @rate_limit(max_per_min=30)
 def get_frp_proxy(name: str):
+    # 读取接口也不应在禁用状态下触发对 FRP 管理 API 的请求
+    disabled = _short_circuit_when_frp_disabled({"proxy": None})
+    if disabled:
+        return disabled
+
     def _do():
         return {"proxy": get_proxy_config(name)}
     return _handle_frp_call(_do, f"获取代理 '{name}' 配置成功")
@@ -224,6 +242,10 @@ def delete_frp_proxy(name: str):
 @log_request("获取FRP完整配置")
 @rate_limit(max_per_min=30)
 def get_frp_config_route():
+    disabled = _short_circuit_when_frp_disabled({"config": "", "proxies": [], "proxies_count": 0})
+    if disabled:
+        return disabled
+
     def _do():
         config_content = get_frp_config()
         proxies = list_proxies()
