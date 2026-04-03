@@ -24,7 +24,13 @@ def validate_path(path: str) -> str:
     if re.search(r'[<>"|?*\x00-\x1f]', path):
         raise InvalidPathError("路径包含非法字符")
 
-    normalized_path = os.path.normpath(path)
+    allowed_base_dir = _get_allowed_base_dir()
+
+    # 支持相对路径：相对 ALLOWED_BASE_DIR 解析，避免依赖当前工作目录。
+    normalized_path = os.path.normpath(path.strip())
+    if not os.path.isabs(normalized_path):
+        normalized_path = os.path.normpath(os.path.join(allowed_base_dir, normalized_path))
+
     if not os.path.exists(normalized_path):
         raise InvalidPathError("路径不存在")
 
@@ -46,7 +52,6 @@ def validate_path(path: str) -> str:
             if abs_path.startswith(sensitive_dir):
                 raise InvalidPathError(f"禁止访问系统敏感目录: {sensitive_dir}")
 
-    allowed_base_dir = _get_allowed_base_dir()
     abs_real_path = os.path.realpath(abs_path)
     try:
         common_path = os.path.commonpath([abs_real_path, allowed_base_dir])

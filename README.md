@@ -155,7 +155,7 @@ curl -s -X POST http://localhost:8080/api/v1/containers \
 | `MAX_RENEW_TIMES` | `3` | 最大续期次数 |
 | `CONTAINER_MEMORY_LIMIT` | `512m` | 默认内存限制 |
 | `CONTAINER_CPU_LIMIT` | — | 默认 CPU 核数限制 |
-| `ALLOWED_BASE_DIR` | **必填** | 允许构建的目录白名单 |
+| `ALLOWED_BASE_DIR` | **必填** | 允许构建的目录白名单根路径 |
 
 ### 安全
 | 变量 | 默认值 | 说明 |
