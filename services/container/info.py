@@ -120,12 +120,7 @@ def list_containers() -> Dict[str, Any]:
         return {"total": 0, "containers": []}
 
     managed_containers = client.containers.list(all=True, filters={"label": "moegate.managed=true"})
-    fallback_all_mode = False
     containers = managed_containers
-    if not containers:
-        # 兼容旧数据：若历史容器缺少受管标签，回退展示全部容器避免列表恒为空。
-        containers = client.containers.list(all=True)
-        fallback_all_mode = True
 
     info = []
     running_count = 0
@@ -166,7 +161,7 @@ def list_containers() -> Dict[str, Any]:
         "running": running_count,
         "standalone": max(0, len(info) - compose_count),
         "compose": compose_count,
-        "fallback_all": fallback_all_mode,
+        "fallback_all": False,
         "containers": info,
     }
 
