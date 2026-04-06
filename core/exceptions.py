@@ -25,6 +25,11 @@ class ContainerNotFoundError(ContainerServiceError):
         super().__init__(f"未找到指定容器: {container_id}", 404)
 
 
+class ManagedEntityNotFoundError(ContainerServiceError):
+    def __init__(self, entity_id: str):
+        super().__init__(f"未找到指定容器或 Compose 项目: {entity_id}", 404)
+
+
 class ValidationError(ContainerServiceError):
     def __init__(self, message: str):
         super().__init__(message, 400)

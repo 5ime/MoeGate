@@ -22,6 +22,10 @@ _TASK_STATE_TTL = 3600  # 已完成任务保留 1 小时
 _TASK_STATE_MAX_SIZE = 5000  # 最多保留条目数
 
 
+def _is_removal_in_progress_error(exc: Exception) -> bool:
+    return "already in progress" in str(exc).lower()
+
+
 def _gc_task_state(state_dict: dict) -> None:
     """清理已完成且超过 TTL 的任务条目（需在 _destroy_task_lock 内调用）。"""
     if len(state_dict) <= _TASK_STATE_MAX_SIZE:
@@ -186,6 +190,12 @@ def submit_compose_project_cleanup_task(compose_project_id: str, container_ids, 
                     current["status"] = "success"
                     current["removed_networks"] = removed_networks
                     current["finished_at"] = _now_iso()
+            logger.info(
+                "Compose 项目 %s 清理完成，容器数: %d，移除网络数: %d",
+                pid,
+                len(normalized_container_ids),
+                len(removed_networks),
+            )
         except Exception as exc:  # pragma: no cover - defensive branch
             logger.exception("后台清理 Compose 项目失败: %s", pid)
             with _destroy_task_lock:
@@ -289,11 +299,13 @@ def _remove_compose_networks(compose_project_id: str, network_names=None):
 
 def destroy_container(container_id: str):
     """销毁指定容器并清理相关资源。"""
-    log_func = logger.debug if not config.DEBUG else logger.info
+    log_func = logger.debug
     log_func("正在销毁容器 %s...", container_id)
     container_name = None
+    compose_project_id = None
     manager = get_container_manager()
     container = None
+    had_error = False
 
     try:
         container = manager.remove_container(container_id)
@@ -315,6 +327,12 @@ def destroy_container(container_id: str):
                 container_name = container.name
             except Exception:
                 pass
+
+            try:
+                labels = container.attrs.get('Config', {}).get('Labels') or {}
+                compose_project_id = labels.get('moegate.compose_project_id') or None
+            except Exception:
+                compose_project_id = None
 
             if config.ENABLE_FRP and container_name:
                 try:
@@ -340,7 +358,10 @@ def destroy_container(container_id: str):
             except NotFound:
                 log_func("容器 %s 已不存在，无需删除", container_id)
             except APIError as e:
-                logger.warning("删除容器时发生 API 错误: %s", e)
+                if _is_removal_in_progress_error(e):
+                    logger.debug("容器 %s 正在被删除，跳过重复 remove", container_id)
+                else:
+                    logger.warning("删除容器时发生 API 错误: %s", e)
 
             try:
                 if hasattr(container, 'attrs'):
@@ -361,8 +382,10 @@ def destroy_container(container_id: str):
     except NotFound:
         log_func("容器 %s 已不存在，无需销毁", container_id)
     except APIError as e:
+        had_error = True
         logger.error("销毁容器时发生 API 错误: %s", e)
     except Exception as e:
+        had_error = True
         logger.error("销毁容器时发生错误: %s", e)
     finally:
         try:
@@ -370,4 +393,8 @@ def destroy_container(container_id: str):
             manager.remove_count(container_id)
             log_func("容器 %s 的资源已清理", container_id)
         except Exception as e:
+            had_error = True
             logger.warning("清理容器资源时发生错误: %s", e)
+
+    if not had_error and not compose_project_id:
+        logger.info("容器 %s 销毁完成", container_id)

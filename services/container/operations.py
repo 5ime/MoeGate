@@ -3,7 +3,11 @@ import logging
 from typing import Dict, Any
 from datetime import datetime
 from config.settings import config as default_config, AppConfig
-from core.exceptions import ValidationError, ContainerNotFoundError, MaxRenewTimesExceededError
+from core.exceptions import (
+    ValidationError,
+    ContainerNotFoundError,
+    MaxRenewTimesExceededError,
+)
 from utils.destroy import (
     submit_destroy_task,
     get_destroy_task_status,
@@ -16,11 +20,71 @@ from infra.docker import ensure_client
 logger = logging.getLogger(__name__)
 
 
-def _list_compose_project_containers(compose_project_id: str):
-    """按 compose 项目标识获取受管容器列表。"""
+def _task_status(task: Dict[str, Any]) -> str:
+    return str((task or {}).get("status") or "").strip().lower()
+
+
+def _build_absent_container_destroy_result(container_id: str) -> Dict[str, Any]:
+    finished_at = datetime.now().isoformat()
+    return {
+        "container_id": container_id,
+        "destroy_task": {
+            "container_id": container_id,
+            "status": "success",
+            "submitted_at": finished_at,
+            "started_at": finished_at,
+            "finished_at": finished_at,
+            "error": None,
+        },
+        "stop_time": finished_at,
+        "already_absent": True,
+    }
+
+
+def _build_absent_compose_project_destroy_result(compose_project_id: str) -> Dict[str, Any]:
+    finished_at = datetime.now().isoformat()
+    cleanup_task = {
+        "compose_project_id": compose_project_id,
+        "status": "success",
+        "submitted_at": finished_at,
+        "started_at": finished_at,
+        "finished_at": finished_at,
+        "error": None,
+        "container_ids": [],
+        "network_names": [],
+        "removed_networks": [],
+    }
+    return {
+        "compose_project_id": compose_project_id,
+        "container_ids": [],
+        "destroy_tasks": [],
+        "stopped_count": 0,
+        "network_names": [],
+        "network_cleanup_task": cleanup_task,
+        "stop_time": finished_at,
+        "already_absent": True,
+    }
+
+
+def _build_existing_compose_project_destroy_result(compose_project_id: str, cleanup_task: Dict[str, Any]) -> Dict[str, Any]:
+    container_ids = list(cleanup_task.get("container_ids") or [])
+    return {
+        "compose_project_id": compose_project_id,
+        "container_ids": container_ids,
+        "destroy_tasks": [get_destroy_task_status(container_id) for container_id in container_ids],
+        "stopped_count": len(container_ids),
+        "network_names": list(cleanup_task.get("network_names") or []),
+        "network_cleanup_task": cleanup_task,
+        "stop_time": datetime.now().isoformat(),
+        "already_absent": _task_status(cleanup_task) == "success",
+    }
+
+
+def _find_compose_project_containers(compose_project_id: str):
+    """按 compose 项目标识获取受管容器列表，未命中时返回空列表。"""
     client = ensure_client()
     if not client:
-        raise ContainerNotFoundError(compose_project_id)
+        return []
 
     containers = client.containers.list(
         all=True,
@@ -31,6 +95,12 @@ def _list_compose_project_containers(compose_project_id: str):
             ]
         },
     )
+    return containers
+
+
+def _list_compose_project_containers(compose_project_id: str):
+    """按 compose 项目标识获取受管容器列表。"""
+    containers = _find_compose_project_containers(compose_project_id)
     if not containers:
         raise ContainerNotFoundError(compose_project_id)
     return containers
@@ -105,9 +175,20 @@ def stop_container(data: Dict[str, Any]) -> Dict[str, Any]:
 
     container = _resolve_managed_container(container_id)
     if container is None:
-        raise ContainerNotFoundError(container_id)
+        existing_task = get_destroy_task_status(container_id)
+        if _task_status(existing_task) in {"pending", "running", "success", "failed"}:
+            logger.debug("容器 %s 删除任务已存在，直接返回当前状态: %s", container_id, _task_status(existing_task))
+            return {
+                "container_id": container_id,
+                "destroy_task": existing_task,
+                "stop_time": datetime.now().isoformat(),
+                "already_absent": _task_status(existing_task) == "success",
+            }
+        logger.debug("容器 %s 已不存在，删除请求按成功处理", container_id)
+        return _build_absent_container_destroy_result(container_id)
 
     task = submit_destroy_task(container_id)
+    logger.info("容器 %s 删除任务已提交", container_id)
     return {
         "container_id": container_id,
         "destroy_task": task,
@@ -121,7 +202,16 @@ def stop_compose_project(data: Dict[str, Any]) -> Dict[str, Any]:
     if not compose_project_id:
         raise ValidationError("缺少 compose_project_id 参数")
 
-    containers = _list_compose_project_containers(compose_project_id)
+    cleanup_task = get_compose_project_cleanup_task_status(compose_project_id)
+    if _task_status(cleanup_task) in {"pending", "running", "success", "failed"}:
+        logger.debug("Compose 项目 %s 删除任务已存在，直接返回当前状态: %s", compose_project_id, _task_status(cleanup_task))
+        return _build_existing_compose_project_destroy_result(compose_project_id, cleanup_task)
+
+    containers = _find_compose_project_containers(compose_project_id)
+    if not containers:
+        logger.debug("Compose 项目 %s 已不存在，删除请求按成功处理", compose_project_id)
+        return _build_absent_compose_project_destroy_result(compose_project_id)
+
     client = ensure_client()
 
     stopped_ids = []
@@ -149,6 +239,12 @@ def stop_compose_project(data: Dict[str, Any]) -> Dict[str, Any]:
         logger.warning("查询 Compose 网络失败: %s", list_network_err)
 
     cleanup_task = submit_compose_project_cleanup_task(compose_project_id, stopped_ids, network_names)
+    logger.info(
+        "Compose 项目 %s 删除任务已提交，容器数: %d，网络数: %d",
+        compose_project_id,
+        len(stopped_ids),
+        len(network_names),
+    )
 
     return {
         "compose_project_id": compose_project_id,
@@ -172,12 +268,28 @@ def stop_any(data: Dict[str, Any]) -> Dict[str, Any]:
     if not entity_id:
         raise ValidationError("缺少 id 参数")
 
-    try:
+    compose_containers = _find_compose_project_containers(entity_id)
+    if compose_containers:
         result = stop_compose_project({"compose_project_id": entity_id})
         return {"kind": "compose_project", **result}
-    except ContainerNotFoundError:
+
+    compose_cleanup_task = get_compose_project_cleanup_task_status(entity_id)
+    if _task_status(compose_cleanup_task) in {"pending", "running", "success", "failed"}:
+        result = stop_compose_project({"compose_project_id": entity_id})
+        return {"kind": "compose_project", **result}
+
+    container = _resolve_managed_container(entity_id)
+    if container is not None:
         result = stop_container({"container_id": entity_id})
         return {"kind": "container", **result}
+
+    destroy_task = get_destroy_task_status(entity_id)
+    if _task_status(destroy_task) in {"pending", "running", "success", "failed"}:
+        result = stop_container({"container_id": entity_id})
+        return {"kind": "container", **result}
+
+    result = _build_absent_compose_project_destroy_result(entity_id)
+    return {"kind": "compose_project", **result}
 
 
 def get_destroy_status(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -185,7 +297,18 @@ def get_destroy_status(data: Dict[str, Any]) -> Dict[str, Any]:
     container_id = data.get("container_id")
     if not container_id:
         raise ValidationError("缺少 container_id 参数")
-    return get_destroy_task_status(container_id)
+    task = get_destroy_task_status(container_id)
+    if _task_status(task) != "not_found":
+        return task
+
+    if _resolve_managed_container(container_id) is None:
+        return {
+            "container_id": container_id,
+            "status": "success",
+            "phase": "finished",
+            "already_absent": True,
+        }
+    return task
 
 
 def get_compose_project_destroy_status(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -195,10 +318,22 @@ def get_compose_project_destroy_status(data: Dict[str, Any]) -> Dict[str, Any]:
         raise ValidationError("缺少 compose_project_id 参数")
 
     cleanup_task = get_compose_project_cleanup_task_status(compose_project_id)
+    if _task_status(cleanup_task) == "not_found":
+        if not _find_compose_project_containers(compose_project_id):
+            return {
+                "compose_project_id": compose_project_id,
+                "status": "success",
+                "phase": "finished",
+                "container_ids": [],
+                "destroy_tasks": [],
+                "network_cleanup_task": cleanup_task,
+                "already_absent": True,
+            }
+
     container_ids = list(cleanup_task.get("container_ids") or [])
     destroy_tasks = [get_destroy_task_status(container_id) for container_id in container_ids]
 
-    cleanup_status = str(cleanup_task.get("status") or "").lower()
+    cleanup_status = _task_status(cleanup_task)
     if cleanup_status == "success":
         status = "success"
         phase = "finished"
