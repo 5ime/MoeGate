@@ -1,4 +1,4 @@
-# MoeGate - 轻量级 Docker 容器管理 API
+# MoeGate - 轻量级 Docker 容器管理网关
 MoeGate 支持通过 Dockerfile / Docker Compose / 镜像名称一键创建容器，自带到期自动销毁、续期、资源限制、FRP 内网穿透等功能。适用于 CTF / 靶场、临时演示环境、在线实验室等场景。
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue)![Flask](https://img.shields.io/badge/Flask-2.x-black)![Docker](https://img.shields.io/badge/Docker-Engine-2496ED)
