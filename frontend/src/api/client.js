@@ -31,6 +31,21 @@ export function clearApiKey() {
   localStorage.removeItem('apiKey');
 }
 
+function normalizeApiErrorMessage(message) {
+  const text = String(message || '').trim();
+  if (!text) return '';
+
+  const lowered = text.toLowerCase();
+  if (
+    lowered.includes('all predefined address pools have been fully subnetted')
+    || lowered.includes('could not find an available, non-overlapping ipv4 address pool')
+  ) {
+    return 'Docker 网络地址池已耗尽，请删除未使用的 Compose 项目或清理无用网络后重试';
+  }
+
+  return text;
+}
+
 export async function apiRequest(endpoint, { method = 'GET', body = null, timeoutMs = 15000 } = {}) {
   const headers = { 'Content-Type': 'application/json' };
   const key = getApiKey();
@@ -56,7 +71,7 @@ export async function apiRequest(endpoint, { method = 'GET', body = null, timeou
     }
 
     if (!response.ok) {
-      const msg = data?.msg || data?.message || `HTTP ${response.status}`;
+      const msg = normalizeApiErrorMessage(data?.msg || data?.message || `HTTP ${response.status}`);
       throw new Error(msg);
     }
 

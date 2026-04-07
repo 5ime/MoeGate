@@ -4,11 +4,13 @@ import BaseModal from './components/BaseModal.vue';
 import ContainersTab from './components/tabs/ContainersTab.vue';
 import CreateTab from './components/tabs/CreateTab.vue';
 import FrpTab from './components/tabs/FrpTab.vue';
+import NetworksTab from './components/tabs/NetworksTab.vue';
 import SystemTab from './components/tabs/SystemTab.vue';
 import { API_PREFIX, apiRequest, getApiBase, setApiBase } from './api/client';
 import {
   isLoggedIn,
   loadFrpPanel,
+  refreshNetworksPanel,
   loadSystemPanel,
   login,
   logout,
@@ -24,6 +26,7 @@ const currentYear = new Date().getFullYear();
 
 const tabs = [
   { key: 'containers', label: '容器', desc: '容器与 Compose 管理' },
+  { key: 'networks', label: '网络', desc: '受管容器网络与占用状态' },
   { key: 'create', label: '创建', desc: '快速创建与高级参数' },
   { key: 'frp', label: 'FRP', desc: '内网穿透与健康检查' },
   { key: 'system', label: '系统', desc: '运行状态与分布式信息' },
@@ -31,6 +34,7 @@ const tabs = [
 
 const tabLoaders = {
   containers: refreshContainersPanel,
+  networks: refreshNetworksPanel,
   create: async () => {},
   frp: loadFrpPanel,
   system: loadSystemPanel,
@@ -99,6 +103,7 @@ const pollDisplay = computed(() => `${runtimePollSec.value} 秒`);
 const activeTab = computed(() => tabs.find((tab) => tab.key === store.activeTab) || tabs[0]);
 const tabComponentMap = {
   containers: ContainersTab,
+  networks: NetworksTab,
   create: CreateTab,
   frp: FrpTab,
   system: SystemTab,

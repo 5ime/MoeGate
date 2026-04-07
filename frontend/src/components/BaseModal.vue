@@ -21,19 +21,19 @@ function onBackdrop() {
   <Teleport to="body">
     <div
       v-if="visible"
-      class="fixed inset-0 flex items-center justify-center bg-black/30 p-5 backdrop-blur-md"
+      class="fixed inset-0 flex items-start justify-center overflow-y-auto bg-black/30 px-3 py-4 backdrop-blur-md sm:items-center sm:p-5"
       :class="zIndex"
       @click.self="onBackdrop"
     >
       <div
-        class="w-full rounded-[22px] border border-slate-200 bg-white shadow-[0_10px_40px_-16px_rgba(10,12,18,0.2)]"
+        class="flex max-h-[calc(100vh-2rem)] w-full flex-col overflow-hidden rounded-[22px] border border-slate-200 bg-white shadow-[0_10px_40px_-16px_rgba(10,12,18,0.2)] sm:max-h-[calc(100vh-2.5rem)]"
         :class="width"
       >
-        <div class="flex items-center justify-between border-b border-slate-100 px-6 py-4">
-          <div class="flex items-center gap-3">
+        <div class="flex shrink-0 items-start justify-between gap-3 border-b border-slate-100 px-4 py-4 sm:px-6">
+          <div class="flex min-w-0 flex-1 items-center gap-3">
             <div
               v-if="icon"
-              class="flex h-8 w-8 items-center justify-center rounded-lg"
+              class="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg"
               :class="{
                 'bg-emerald-50 text-emerald-600': icon === 'success',
                 'bg-red-50 text-red-600': icon === 'error',
@@ -62,24 +62,24 @@ function onBackdrop() {
               </svg>
             </div>
 
-            <div>
-              <h3 class="text-base font-semibold text-slate-900">{{ title }}</h3>
-              <p v-if="subtitle" class="text-xs text-slate-500">{{ subtitle }}</p>
+            <div class="min-w-0">
+              <h3 class="break-words text-base font-semibold text-slate-900">{{ title }}</h3>
+              <p v-if="subtitle" class="mt-0.5 break-words text-xs text-slate-500">{{ subtitle }}</p>
             </div>
           </div>
 
           <button
             v-if="showClose"
-            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
+            class="inline-flex h-8 shrink-0 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
             @click="emit('close')"
           >{{ closeText }}</button>
         </div>
 
-        <div class="px-6 py-4">
+        <div class="min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-4 sm:px-6">
           <slot />
         </div>
 
-        <div v-if="$slots.footer" class="flex items-center justify-end gap-2 border-t border-slate-100 px-6 py-3">
+        <div v-if="$slots.footer" class="flex shrink-0 flex-wrap items-center justify-end gap-2 border-t border-slate-100 bg-white px-4 py-3 sm:px-6">
           <slot name="footer" />
         </div>
       </div>

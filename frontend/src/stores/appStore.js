@@ -18,6 +18,15 @@ export const store = reactive({
   message: '',
   messageType: 'success',
   containers: [],
+  networks: {
+    items: [],
+    stats: {
+      total: 0,
+      inUse: 0,
+      idle: 0,
+      composeBound: 0,
+    },
+  },
   stats: {
     total: 0,
     running: 0,
@@ -141,6 +150,11 @@ export function logout() {
   clearApiKey();
   store.apiKey = '';
   store.containers = [];
+  store.networks.items = [];
+  store.networks.stats.total = 0;
+  store.networks.stats.inUse = 0;
+  store.networks.stats.idle = 0;
+  store.networks.stats.composeBound = 0;
   store.stats.total = 0;
   store.stats.running = 0;
   store.systemStatus = null;
@@ -174,6 +188,45 @@ export async function loadContainers() {
   store.containers = list;
   store.stats.total = list.length;
   store.stats.running = list.filter((item) => String(item.status || '').toLowerCase() === 'running').length;
+}
+
+export async function loadManagedNetworks() {
+  const result = await apiRequest('/networks');
+  const items = result?.data?.networks || [];
+  store.networks.items = items;
+  store.networks.stats.total = Number(result?.data?.total ?? items.length) || 0;
+  store.networks.stats.inUse = Number(result?.data?.in_use ?? items.filter((item) => item?.is_in_use).length) || 0;
+  store.networks.stats.idle = Number(result?.data?.idle ?? items.filter((item) => !item?.is_in_use).length) || 0;
+  store.networks.stats.composeBound = items.filter((item) => !!item?.compose_project_id).length;
+  return items;
+}
+
+export async function loadManagedNetworkDetail(networkId) {
+  const result = await apiRequest(`/networks/${encodeURIComponent(networkId)}`);
+  return result?.data || null;
+}
+
+export async function createManagedNetwork(payload) {
+  return apiRequest('/networks', {
+    method: 'POST',
+    body: payload,
+    timeoutMs: 60000,
+  });
+}
+
+export async function updateManagedNetwork(networkId, payload) {
+  return apiRequest(`/networks/${encodeURIComponent(networkId)}`, {
+    method: 'PUT',
+    body: payload,
+    timeoutMs: 60000,
+  });
+}
+
+export async function deleteManagedNetwork(networkId) {
+  return apiRequest(`/networks/${encodeURIComponent(networkId)}`, {
+    method: 'DELETE',
+    timeoutMs: 60000,
+  });
 }
 
 export async function createContainer(payload) {
@@ -221,7 +274,7 @@ export async function getComposeProjectDestroyStatus(projectId) {
 }
 
 export async function waitContainerDestroyStatus(containerId, {
-  pollIntervalMs = 1000,
+  pollIntervalMs = 2000,
   timeoutMs = 90000,
 } = {}) {
   const start = Date.now();
@@ -272,7 +325,7 @@ export async function deleteComposeProject(projectId) {
 }
 
 export async function waitComposeProjectDestroyStatus(projectDeleteResponse, {
-  pollIntervalMs = 1000,
+  pollIntervalMs = 2000,
   timeoutMs = 120000,
 } = {}) {
   const projectId = projectDeleteResponse?.data?.compose_project_id;
@@ -349,6 +402,10 @@ export async function loadMetrics() {
 
 export async function refreshContainersPanel() {
   await Promise.allSettled([loadContainers(), loadSystemStatus()]);
+}
+
+export async function refreshNetworksPanel() {
+  await loadManagedNetworks();
 }
 
 export async function loadSystemPanel() {
@@ -536,6 +593,15 @@ export async function saveFrpPreferences(preferences) {
 }
 
 export async function loadFrpHealth() {
+  // FRP 未启用时不做健康检查，避免前端无意义地请求 /frp/health
+  if (!store.frp.enabled) {
+    store.frp.healthText = '未启用';
+    store.frp.health.enabled = false;
+    store.frp.health.overallOk = false;
+    store.frp.health.serverReachable = false;
+    store.frp.health.adminReachable = false;
+    return;
+  }
   try {
     const result = await apiRequest('/frp/health');
     const data = result?.data || {};
@@ -604,5 +670,13 @@ export async function loadFrpConfig() {
 }
 
 export async function loadFrpPanel() {
-  await Promise.allSettled([loadFrpSettings(), loadFrpHealth(), loadFrpProxies()]);
+  // 先加载 settings，避免并发导致 enabled 还没更新就去请求 health/proxies
+  await loadFrpSettings();
+  if (!store.frp.enabled) {
+    await loadFrpHealth();
+    store.frp.proxies = [];
+    store.frp.configText = '';
+    return;
+  }
+  await Promise.allSettled([loadFrpHealth(), loadFrpProxies()]);
 }

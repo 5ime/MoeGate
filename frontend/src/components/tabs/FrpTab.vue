@@ -2,6 +2,12 @@
 import { computed, onMounted, reactive, ref } from 'vue';
 import BaseModal from '../BaseModal.vue';
 import ConfirmModal from '../ConfirmModal.vue';
+import SearchSelectBar from '../SearchSelectBar.vue';
+import FrpProxyCard from '../frp/FrpProxyCard.vue';
+import FrpCreateProxyModal from '../frp/FrpCreateProxyModal.vue';
+import FrpEditProxyModal from '../frp/FrpEditProxyModal.vue';
+import FrpPreferencesModal from '../frp/FrpPreferencesModal.vue';
+import StatCard from '../ui/StatCard.vue';
 import { useConfirmAction, useFlashEffect, useInlineError } from '../../composables';
 import {
   createFrpProxy,
@@ -308,8 +314,8 @@ onMounted(() => {
 </script>
 
 <template>
-  <section class="space-y-6">
-    <div class="rounded-md border border-slate-200 p-5 md:p-6">
+  <section class="space-y-5">
+    <div class="rounded-xl border border-slate-200 p-5 md:p-6">
       <div class="mb-4 flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-4">
         <div>
           <p class="text-[12px] font-medium uppercase tracking-wider text-slate-500">FRP 工作台</p>
@@ -325,7 +331,7 @@ onMounted(() => {
         </div>
       </div>
       <div class="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-12">
-        <div class="flex h-full flex-col rounded-xl border border-slate-200 bg-white px-4 py-3 md:col-span-1 xl:col-span-4">
+        <div class="flex h-full flex-col rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition md:col-span-1 xl:col-span-4">
           <div class="flex items-center justify-between gap-2">
             <div class="text-xs font-medium uppercase tracking-wider text-slate-500">FRP 开关</div>
             <span class="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">{{ switchSaving ? '保存中...' : '即时生效' }}</span>
@@ -343,18 +349,18 @@ onMounted(() => {
           <p class="mt-auto pt-2 text-xs leading-5 text-slate-500">开启后可使用域名方式代理访问服务</p>
         </div>
 
-        <div class="flex h-full flex-col rounded-xl border border-slate-200 bg-white px-4 py-3 md:col-span-1 xl:col-span-4">
+        <div class="flex h-full flex-col rounded-xl border border-slate-200 bg-white px-4 py-3 shadow-sm transition md:col-span-1 xl:col-span-4">
           <div id="frpHealthText">
             <div class="flex items-center justify-between gap-2">
               <div class="text-xs font-medium uppercase tracking-wider text-slate-500">健康状态</div>
               <span class="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">实时</span>
             </div>
             <div class="mt-2 flex flex-wrap items-center gap-2.5">
-              <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-[#fafbfd] px-2.5 py-1 text-[12px] text-slate-600">
+              <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50/70 px-2.5 py-1 text-[12px] text-slate-600">
                 <i class="inline-block h-2 w-2 rounded-full animate-[healthPulse_1.6s_ease-in-out_infinite]" :class="store.frp.health.serverReachable ? 'bg-emerald-700' : 'bg-[#922f2f]'"></i>
                 服务端 {{ store.frp.health.serverReachable ? '可达' : '不可达' }}
               </span>
-              <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-[#fafbfd] px-2.5 py-1 text-[12px] text-slate-600">
+              <span class="inline-flex items-center gap-1.5 rounded-full border border-slate-200 bg-slate-50/70 px-2.5 py-1 text-[12px] text-slate-600">
                 <i class="inline-block h-2 w-2 rounded-full animate-[healthPulse_1.6s_ease-in-out_infinite]" :class="store.frp.health.adminReachable ? 'bg-emerald-700' : 'bg-[#922f2f]'"></i>
                 管理端 {{ store.frp.health.adminReachable ? '可达' : '不可达' }}
               </span>
@@ -363,28 +369,24 @@ onMounted(() => {
           <p class="mt-auto pt-2 text-xs leading-5 text-slate-500">目前 FRP 状态 · {{ healthState.label }}</p>
         </div>
 
-        <div class="flex h-full flex-col rounded-xl border border-slate-200 bg-white px-4 py-3 md:col-span-2 xl:col-span-4">
-          <div class="flex items-center justify-between gap-2">
-            <div class="text-xs font-medium uppercase tracking-wider text-slate-500">代理数量</div>
-            <span class="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">当前</span>
-          </div>
-          <div class="mt-2 block text-[26px] font-semibold leading-none tracking-tight text-slate-900">{{ store.frp.proxies.length }}</div>
-          <p class="mt-auto pt-2 text-xs leading-5 text-slate-500">当前已配置的 FRP 代理总数</p>
-        </div>
+        <StatCard
+          class="md:col-span-2 xl:col-span-4"
+          title="代理数量"
+          badge="当前"
+          :value="store.frp.proxies.length"
+          description="当前已配置的 FRP 代理总数"
+          height-class="h-full"
+        />
       </div>
     </div>
 
-    <div class="grid grid-cols-1 gap-5 xl:grid-cols-12">
-      <div class="xl:col-span-12 flex flex-col">
-        <div class="rounded-md border border-slate-200 p-4 md:p-5 mb-3">
-          <div class="flex items-center gap-3 max-md:flex-col max-md:items-stretch">
-            <input
-              v-model="proxyKeyword"
-              id="frpSearch"
-              type="text"
-              placeholder="搜索名称/类型/端口..."
-              class="min-w-[240px] flex-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-500 focus:outline-none focus:ring-4 focus:ring-slate-100 max-md:min-w-0 max-md:w-full"
-            />
+    <SearchSelectBar
+      v-model:search="proxyKeyword"
+      :show-select="false"
+      search-id="frpSearch"
+      search-placeholder="搜索名称/类型/端口..."
+    >
+      <template #tail>
             <button
               id="openCreateProxyBtn"
               type="button"
@@ -392,294 +394,71 @@ onMounted(() => {
               :disabled="createPending || !store.frp.enabled"
               @click="createModal = true"
             >
-              <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
               新增代理
             </button>
-          </div>
-        </div>
+      </template>
+    </SearchSelectBar>
         <div id="frpList" class="grid grid-cols-1 gap-5 xl:grid-cols-2 flex-1 min-h-[220px]" v-if="filteredProxies.length">
-          <div
+      <FrpProxyCard
             v-for="proxy in filteredProxies"
             :key="proxy.name || proxy.local_port"
-            class="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm transition "
-            :class="isFlashing('proxy', proxy.name) ? 'entity-flash' : ''"
-          >
-            <div class="mb-4 flex items-start justify-between border-b border-slate-100 pb-3">
-              <div class="min-w-0 flex-1">
-                <div class="break-words text-lg font-semibold tracking-tight text-slate-900">{{ proxy.name || '未命名代理' }}</div>
-              </div>
-              <span class="ml-3 flex-shrink-0 rounded-full border px-2.5 py-1 text-[11px] font-semibold uppercase tracking-wider border-slate-200 bg-slate-50 text-slate-700">
-                {{ (proxy.type || proxy.proxy_type || 'tcp') }}
-              </span>
+        :proxy="proxy"
+        :flashing="isFlashing('proxy', proxy.name)"
+        :can-edit="store.frp.enabled && !editPending"
+        :can-delete="store.frp.enabled"
+        :deleting="deletingName === proxy.name"
+        :inline-error="proxyErrorText && matchesProxyKey(`proxy:${proxy.name}`) ? proxyErrorText : ''"
+        @edit="openEdit"
+        @delete="removeProxy"
+      />
             </div>
 
-            <div class="my-4 grid grid-cols-1 gap-2 rounded-xl border border-slate-100 bg-slate-50/70 p-3.5">
-              <div class="flex items-start justify-between">
-                <span class="text-[12px] font-medium text-slate-500">本地端口</span>
-                <span class="max-w-[60%] break-words text-right text-[12px] font-semibold text-slate-800">{{ proxy.localPort ?? proxy.local_port ?? '-' }}</span>
-              </div>
-              <div class="flex items-start justify-between">
-                <span class="text-[12px] font-medium text-slate-500">远程端口</span>
-                <span class="max-w-[60%] break-words text-right text-[12px] font-semibold text-slate-800">{{ proxy.remotePort ?? proxy.remote_port ?? '-' }}</span>
-              </div>
-              <div class="flex items-start justify-between">
-                <span class="text-[12px] font-medium text-slate-500">域名</span>
-                <span
-                  class="max-w-[60%] break-all text-right text-[12px] font-semibold text-slate-800"
-                  :title="proxy.domain || (proxy.customDomains && proxy.customDomains[0]) || '-'"
-                >{{ proxy.domain || (proxy.customDomains && proxy.customDomains[0]) || '-' }}</span>
-              </div>
-            </div>
-
-            <div class="border-t border-slate-100 pt-3.5">
-              <div class="flex items-center gap-2">
-                <button
-                  class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
-                  :disabled="!store.frp.enabled || editPending"
-                  @click="openEdit(proxy.name)"
-                >编辑</button>
-                <span class="flex-1"></span>
-                <button
-                  class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-[#922f2f] bg-[#922f2f] px-3 text-xs font-medium text-white transition hover:border-[#7b2929] hover:bg-[#7b2929] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
-                  :disabled="!store.frp.enabled || deletingName === proxy.name"
-                  @click="removeProxy(proxy.name)"
-                >{{ deletingName === proxy.name ? '删除中...' : '删除' }}</button>
-              </div>
-              <p v-if="proxyErrorText && matchesProxyKey(`proxy:${proxy.name}`)" class="mt-2 text-xs leading-5 text-rose-600">{{ proxyErrorText }}</p>
-            </div>
-          </div>
-        </div>
-
-        <div v-else class="flex-1 min-h-[320px] rounded-[16px] border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-700 flex items-center justify-center">
-          <span>{{ proxyKeyword ? '未匹配到代理' : '暂无 FRP 代理' }}</span>
-        </div>
-      </div>
+    <div v-else class="rounded-xl border border-dashed border-slate-300 bg-slate-50 p-8 text-center text-sm text-slate-700">
+      {{ proxyKeyword ? '未匹配到代理' : '暂无 FRP 代理' }}
     </div>
 
-    <BaseModal
+    <FrpCreateProxyModal
       :visible="createModal"
-      title="新增代理"
-      icon="bolt"
-      width="max-w-[640px]"
-      close-text="取消"
+      :pending="createPending"
+      :enabled="store.frp.enabled"
+      :inline-error="createInlineError"
+      v-model:name="form.name"
+      v-model:localPort="form.localPort"
+      v-model:remotePort="form.remotePort"
+      v-model:type="form.type"
+      v-model:domain="form.domain"
       @close="createModal = false"
-    >
-      <form id="createFrpForm" @submit.prevent="submitProxy">
-        <div class="space-y-4">
-          <div class="rounded-2xl border border-slate-200 bg-white p-4">
-            <div class="mb-3">
-              <p class="text-xs font-semibold tracking-tight text-slate-900">基础信息</p>
-              <p class="mt-1 text-xs text-slate-500">名称与本地端口必填，其它为可选项。</p>
-            </div>
+      @submit="submitProxy"
+    />
 
-            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label for="frpName" class="block text-xs font-medium text-slate-600">名称 *</label>
-                <input id="frpName" v-model="form.name" type="text" placeholder="如: web-uid-123" required :disabled="createPending" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-              </div>
-              <div>
-                <label for="frpLocalPort" class="block text-xs font-medium text-slate-600">本地端口 *</label>
-                <input id="frpLocalPort" v-model="form.localPort" type="number" min="1" placeholder="如: 8080" required :disabled="createPending" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-              </div>
-            </div>
-
-            <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-              <div>
-                <label for="frpType" class="block text-xs font-medium text-slate-600">类型</label>
-                <input id="frpType" v-model="form.type" type="text" placeholder="tcp / http / https / udp" :disabled="createPending" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-              </div>
-              <div>
-                <label for="frpRemotePort" class="block text-xs font-medium text-slate-600">远程端口</label>
-                <input id="frpRemotePort" v-model="form.remotePort" type="number" min="1024" max="65535" placeholder="如: 20080" :disabled="createPending" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-              </div>
-            </div>
-          </div>
-
-          <div class="rounded-2xl border border-slate-200 bg-white p-4">
-            <div class="mb-3">
-              <p class="text-xs font-semibold tracking-tight text-slate-900">域名（可选）</p>
-              <p class="mt-1 text-xs text-slate-500">HTTP/HTTPS 可填写域名；TCP 通常留空。</p>
-            </div>
-            <label for="frpDomain" class="block text-xs font-medium text-slate-600">域名</label>
-            <input id="frpDomain" v-model="form.domain" type="text" placeholder="如: sub.example.com" :disabled="createPending" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-          </div>
-
-          <p v-if="createInlineError" class="text-xs leading-5 text-rose-600">{{ createInlineError }}</p>
-        </div>
-      </form>
-      <template #footer>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="createPending" type="button" @click="createModal = false">取消</button>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="createPending || !store.frp.enabled" type="submit" form="createFrpForm">{{ createPending ? '提交中...' : '新增代理' }}</button>
-      </template>
-    </BaseModal>
-
-    <BaseModal
+    <FrpPreferencesModal
       :visible="preferencesModal"
-      title="偏好设置"
-      icon="bolt"
-      width="max-w-[880px]"
+      :loading="preferencesLoading"
+      :saving="preferencesSaving"
+      v-model:server-addr="preferencesForm.serverAddr"
+      v-model:server-port="preferencesForm.serverPort"
+      v-model:vhost-http-port="preferencesForm.vhostHttpPort"
+      v-model:admin-ip="preferencesForm.adminIp"
+      v-model:admin-port="preferencesForm.adminPort"
+      v-model:admin-user="preferencesForm.adminUser"
+      v-model:admin-password="preferencesForm.adminPassword"
+      v-model:use-domain="preferencesForm.useDomain"
+      v-model:domain-suffix="preferencesForm.domainSuffix"
       @close="closePreferences"
-    >
-      <div class="space-y-4">
-        <!-- FRPS -->
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3">
-            <p class="text-xs font-semibold tracking-tight text-slate-900">FRPS 连接</p>
-            <p class="mt-1 text-xs text-slate-500">用于 FRPC 连接服务端建立隧道。</p>
-          </div>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label for="frpServerAddrInput" class="block text-xs font-medium text-slate-600">服务地址</label>
-              <input id="frpServerAddrInput" v-model="preferencesForm.serverAddr" type="text" :disabled="preferencesSaving" placeholder="如: 1.2.3.4 或 frps.example.com" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-            <div>
-              <label for="frpServerPortInput" class="block text-xs font-medium text-slate-600">服务端口</label>
-              <input id="frpServerPortInput" v-model="preferencesForm.serverPort" type="number" min="1" :disabled="preferencesSaving" placeholder="7000" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-          </div>
-        </div>
+      @save="savePreferences"
+    />
 
-        <!-- Admin -->
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3">
-            <p class="text-xs font-semibold tracking-tight text-slate-900">管理面板</p>
-            <p class="mt-1 text-xs text-slate-500">用于读取运行状态与健康检查（可选）。</p>
-          </div>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label for="frpAdminIpInput" class="block text-xs font-medium text-slate-600">管理地址</label>
-              <input id="frpAdminIpInput" v-model="preferencesForm.adminIp" type="text" :disabled="preferencesSaving" placeholder="127.0.0.1" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-            <div>
-              <label for="frpAdminPortInput" class="block text-xs font-medium text-slate-600">管理端口</label>
-              <input id="frpAdminPortInput" v-model="preferencesForm.adminPort" type="number" min="1" :disabled="preferencesSaving" placeholder="7400" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-          </div>
-          <div class="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label for="frpAdminUserInput" class="block text-xs font-medium text-slate-600">用户名</label>
-              <input id="frpAdminUserInput" v-model="preferencesForm.adminUser" type="text" :disabled="preferencesSaving" placeholder="可选" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-            <div>
-              <label for="frpAdminPasswordInput" class="block text-xs font-medium text-slate-600">密码</label>
-              <input id="frpAdminPasswordInput" v-model="preferencesForm.adminPassword" type="password" :disabled="preferencesSaving" placeholder="可选" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-          </div>
-        </div>
-
-        <!-- Domain -->
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <p class="text-xs font-semibold tracking-tight text-slate-900">域名模式</p>
-              <p class="mt-1 text-xs text-slate-500">开启后可为 HTTP/HTTPS 代理自动分配子域名。</p>
-            </div>
-            <span class="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">即时生效</span>
-          </div>
-
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div class="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
-              <label for="frpUseDomainSwitch" class="block text-xs font-medium text-slate-600">启用域名模式</label>
-              <div class="mt-2 flex items-center gap-3">
-                <label class="relative inline-block h-6 w-11">
-                  <input id="frpUseDomainSwitch" class="peer h-0 w-0 opacity-0" v-model="preferencesForm.useDomain" type="checkbox" :disabled="preferencesSaving" />
-                  <span class="absolute inset-0 cursor-pointer rounded-full bg-slate-300 transition peer-checked:bg-slate-900"></span>
-                  <span class="absolute left-[3px] top-[3px] h-[18px] w-[18px] rounded-full bg-white shadow-[0_1px_2px_rgba(0,0,0,0.18)] transition peer-checked:translate-x-5"></span>
-                </label>
-                <span class="text-xs font-medium" :class="preferencesForm.useDomain ? 'text-emerald-700' : 'text-slate-600'">{{ preferencesForm.useDomain ? '已启用' : '已关闭' }}</span>
-              </div>
-              <p class="mt-2 text-[11px] leading-4 text-slate-500">切换后立即下发设置。</p>
-            </div>
-
-            <div class="rounded-xl border border-slate-200 bg-slate-50/50 p-3">
-              <label for="frpVhostHttpPortInput" class="block text-xs font-medium text-slate-600">HTTP 入口端口</label>
-              <input id="frpVhostHttpPortInput" v-model="preferencesForm.vhostHttpPort" type="number" min="1" :disabled="preferencesSaving" placeholder="80，可留空" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-              <p class="mt-2 text-[11px] leading-4 text-slate-500">对应服务端 vhost_http_port。</p>
-            </div>
-          </div>
-
-          <div class="mt-3">
-            <label for="frpDomainSuffixInput" class="block text-xs font-medium text-slate-600">域名后缀</label>
-            <div class="relative mt-2">
-              <input
-                id="frpDomainSuffixInput"
-                v-model="preferencesForm.domainSuffix"
-                type="text"
-                :disabled="preferencesSaving || !preferencesForm.useDomain"
-                placeholder="如: example.com"
-                class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
-              />
-              <div
-                v-if="!preferencesForm.useDomain"
-                class="absolute inset-0 flex items-center justify-center rounded-xl bg-slate-100/80 px-4 text-center text-xs font-medium leading-5 text-slate-600 backdrop-blur-sm"
-              >
-                请先开启域名模式
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <template #footer>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="preferencesSaving" @click="closePreferences">取消</button>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="preferencesSaving" @click="savePreferences">{{ preferencesSaving ? '保存中...' : '保存设置' }}</button>
-      </template>
-    </BaseModal>
-
-    <BaseModal
+    <FrpEditProxyModal
       :visible="!!editingName"
-      title="编辑代理"
-      icon="bolt"
-      width="max-w-[720px]"
-      close-text="取消"
+      :pending="editPending"
+      :inline-error="editInlineError"
+      v-model:type="editForm.type"
+      v-model:localPort="editForm.localPort"
+      v-model:remotePort="editForm.remotePort"
+      v-model:domain="editForm.domain"
       @close="cancelEdit"
-    >
-
-      <div class="space-y-4">
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3">
-            <p class="text-xs font-semibold tracking-tight text-slate-900">端口与类型</p>
-            <p class="mt-1 text-xs text-slate-500">修改后会更新对应代理配置。</p>
-          </div>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-3">
-            <div>
-              <label for="editFrpType" class="block text-xs font-medium text-slate-600">类型</label>
-              <input
-                id="editFrpType"
-                v-model="editForm.type"
-                type="text"
-                :disabled="editPending"
-                placeholder="tcp / http / https / udp"
-                class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
-              />
-            </div>
-            <div>
-              <label for="editFrpLocalPort" class="block text-xs font-medium text-slate-600">本地端口</label>
-              <input id="editFrpLocalPort" v-model="editForm.localPort" type="number" min="1" :disabled="editPending" placeholder="如: 8080" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-            <div>
-              <label for="editFrpRemotePort" class="block text-xs font-medium text-slate-600">远程端口</label>
-              <input id="editFrpRemotePort" v-model="editForm.remotePort" type="number" min="1024" max="65535" :disabled="editPending" placeholder="如: 20080" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-            </div>
-          </div>
-        </div>
-
-        <div v-show="['http','https'].includes(String(editForm.type || '').toLowerCase())" class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3">
-            <p class="text-xs font-semibold tracking-tight text-slate-900">域名</p>
-          </div>
-          <label for="editFrpDomain" class="block text-xs font-medium text-slate-600">域名</label>
-          <input id="editFrpDomain" v-model="editForm.domain" type="text" :disabled="editPending" placeholder="如: xxx.example.com" class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
-        </div>
-
-        <p v-if="editInlineError" class="text-xs leading-5 text-rose-600">{{ editInlineError }}</p>
-      </div>
-
-      <template #footer>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" @click="cancelEdit">取消</button>
-        <button class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="editPending" @click="saveEdit">{{ editPending ? '保存中...' : '保存修改' }}</button>
-      </template>
-    </BaseModal>
+      @save="saveEdit"
+    />
 
     <BaseModal
       :visible="configModal"
@@ -696,7 +475,7 @@ onMounted(() => {
           </div>
           <span class="rounded-full border border-slate-200 bg-white px-2 py-0.5 text-[11px] text-slate-600">只读</span>
         </div>
-        <pre class="max-h-[64vh] overflow-y-auto rounded-[14px] border border-slate-200 bg-[#fbfbfc] p-3 font-mono text-xs leading-relaxed text-slate-900">{{ store.frp.configText || '暂无配置' }}</pre>
+        <pre class="max-h-[64vh] overflow-y-auto rounded-[14px] border border-slate-200 bg-slate-50/60 p-3 font-mono text-xs leading-relaxed text-slate-900">{{ store.frp.configText || '暂无配置' }}</pre>
       </div>
     </BaseModal>
 

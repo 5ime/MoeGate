@@ -4,6 +4,7 @@ import {
   loadContainerDefaultsSetting,
   loadContainerLimitsSetting,
   loadContainers,
+  loadManagedNetworks,
   loadImageSourceSetting,
   saveContainerLimitsSetting,
   saveImageSourceSetting,
@@ -12,6 +13,9 @@ import {
 } from '../../stores/appStore';
 import BaseModal from '../BaseModal.vue';
 import BuildProgressModal from '../BuildProgressModal.vue';
+import { parseKeyValueLines } from '../../composables';
+import KeyValueLinesEditor from '../KeyValueLinesEditor.vue';
+import CreatePreferencesModal from '../container/CreatePreferencesModal.vue';
 
 const form = reactive({
   source: 'path',
@@ -20,6 +24,7 @@ const form = reactive({
   image: '',
   uid: '',
   command: '',
+  network: '',
   port_mappings_text: '',
   min_port: '',
   max_port: '',
@@ -33,7 +38,6 @@ const form = reactive({
 
 const showBuildModal = ref(false);
 const buildPayload = ref(null);
-const showAdvanced = ref(false);
 const showPreferencesModal = ref(false);
 const imageSourceInput = ref('');
 const maxContainersInput = ref('');
@@ -51,6 +55,16 @@ function applyContainerDefaults(defaults = store.settings.containerDefaults) {
   form.memory_limit = String(source.memoryLimit ?? '512m');
   form.cpu_limit = String(source.cpuLimit ?? 1.0);
   form.cpu_shares = String(source.cpuShares ?? 1024);
+}
+
+function parseEnvText(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return {};
+  return parseKeyValueLines(raw, {
+    allowColon: true,
+    invalidLineMessage: (line) => `环境变量格式错误，请使用 key=value: ${line}`,
+    emptyKeyMessage: (line) => `环境变量键不能为空: ${line}`,
+  });
 }
 
 function submit() {
@@ -71,6 +85,7 @@ function submit() {
 
   if (form.uid.trim()) payload.uid = form.uid.trim();
   if (form.command.trim()) payload.command = form.command.trim();
+  if (form.network.trim()) payload.network = form.network.trim();
   if (form.port_mode === 'fixed') {
     if (!form.port_mappings_text.trim()) {
       showMessage('请填写固定端口映射', 'error');
@@ -89,10 +104,10 @@ function submit() {
 
   try {
     if (form.envText.trim()) {
-      payload.env = JSON.parse(form.envText.trim());
+      payload.env = parseEnvText(form.envText);
     }
-  } catch {
-    showMessage('环境变量 JSON 格式错误', 'error');
+  } catch (error) {
+    showMessage(error.message || '环境变量格式错误', 'error');
     return;
   }
 
@@ -107,6 +122,7 @@ function resetForm() {
   form.image = '';
   form.uid = '';
   form.command = '';
+  form.network = '';
   form.port_mappings_text = '';
   form.min_port = String(store.settings.containerDefaults.minPort ?? 20000);
   form.max_port = String(store.settings.containerDefaults.maxPort ?? 30000);
@@ -208,25 +224,23 @@ function validateEnvFormat() {
   }
 
   try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      showMessage('环境变量必须是 JSON 对象格式，例如 {"KEY":"VALUE"}', 'error');
-      return;
-    }
+    const parsed = parseEnvText(raw);
     showMessage(`格式正确，共 ${Object.keys(parsed).length} 项环境变量`, 'success');
-  } catch {
-    showMessage('环境变量 JSON 格式错误，请检查逗号和引号', 'error');
+  } catch (error) {
+    showMessage(error.message || '环境变量格式错误，请检查填写内容', 'error');
   }
 }
 
 onMounted(async () => {
   await loadContainerDefaults();
+  // 可选：用于“网络”下拉建议（不影响创建行为，加载失败也可直接手填 network 名称）
+  loadManagedNetworks().catch(() => {});
 });
 </script>
 
 <template>
   <section class="space-y-5">
-    <div class="rounded-md border border-slate-200 p-5 md:p-6">
+    <div class="rounded-xl border border-slate-200 p-5 md:p-6">
       <div class="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p class="text-[12px] font-medium uppercase tracking-wider text-slate-500">创建向导</p>
@@ -256,7 +270,7 @@ onMounted(async () => {
 
         <div class="space-y-5">
 
-          <div class="rounded-md border border-slate-200 p-5 md:p-6">
+          <div class="rounded-xl border border-slate-200 p-5 md:p-6">
             <div class="mb-4 flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900">
               <svg class="h-[18px] w-[18px] flex-shrink-0 text-slate-500" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M3 4.25A2.25 2.25 0 015.25 2h5.532a2.25 2.25 0 011.591.659l4.418 4.418A2.25 2.25 0 0117.25 8.59V17.75A2.25 2.25 0 0115 20H5.25A2.25 2.25 0 013 17.75V4.25z" clip-rule="evenodd"/></svg>
               <span>部署来源</span>
@@ -274,7 +288,6 @@ onMounted(async () => {
                 :class="{ 'text-slate-900': form.source === 'path' }"
                 @click="form.source = 'path'"
               >
-                <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3.5A1.5 1.5 0 012.5 2h3.879a1.5 1.5 0 011.06.44l1.122 1.12A1.5 1.5 0 009.62 4H13.5A1.5 1.5 0 0115 5.5v8a1.5 1.5 0 01-1.5 1.5h-11A1.5 1.5 0 011 13.5v-10z"/></svg>
                 路径
               </button>
               <button
@@ -283,7 +296,6 @@ onMounted(async () => {
                 :class="{ 'text-slate-900': form.source === 'image' }"
                 @click="form.source = 'image'"
               >
-                <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M2 4a2 2 0 012-2h8a2 2 0 012 2v8a2 2 0 01-2 2H4a2 2 0 01-2-2V4zm2-.5a.5.5 0 00-.5.5v8a.5.5 0 00.5.5h8a.5.5 0 00.5-.5V4a.5.5 0 00-.5-.5H4z"/></svg>
                 镜像
               </button>
             </div>
@@ -301,32 +313,59 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div class="rounded-md border border-slate-200 p-5 md:p-6">
+          <div class="rounded-xl border border-slate-200 p-5 md:p-6">
             <div class="mb-4 flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900">
               <svg class="h-[18px] w-[18px] flex-shrink-0 text-slate-500" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.84 1.804A1 1 0 018.82 1h2.36a1 1 0 01.98.804l.331 1.652a6.993 6.993 0 011.929 1.115l1.598-.54a1 1 0 011.186.447l1.18 2.044a1 1 0 01-.205 1.251l-1.267 1.113a7.047 7.047 0 010 2.228l1.267 1.113a1 1 0 01.206 1.25l-1.18 2.045a1 1 0 01-1.187.447l-1.598-.54a6.993 6.993 0 01-1.929 1.115l-.33 1.652a1 1 0 01-.98.804H8.82a1 1 0 01-.98-.804l-.331-1.652a6.993 6.993 0 01-1.929-1.115l-1.598.54a1 1 0 01-1.186-.447l-1.18-2.044a1 1 0 01.205-1.251l1.267-1.114a7.05 7.05 0 010-2.227L1.821 7.773a1 1 0 01-.206-1.25l1.18-2.045a1 1 0 011.187-.447l1.598.54A6.993 6.993 0 017.51 3.456l.33-1.652zM10 13a3 3 0 100-6 3 3 0 000 6z" clip-rule="evenodd"/></svg>
               <span>基础参数</span>
+              <span class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500">可选</span>
             </div>
 
-            <div class="grid grid-cols-2 gap-4 max-md:grid-cols-1">
-              <div class="mb-4">
+            <div class="grid grid-cols-1 gap-4 md:grid-cols-2">
+              <div>
                 <label for="containerUid" class="mb-2 block text-xs font-medium text-slate-600">用户标识 (UID)</label>
-                <input id="containerUid" v-model="form.uid" type="text" placeholder="可选" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:outline-none" />
+                <input
+                  id="containerUid"
+                  v-model="form.uid"
+                  type="text"
+                  placeholder="可选"
+                  class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 focus:outline-none"
+                />
+                <p class="mt-2 text-xs leading-relaxed text-slate-500">留空则自动生成 UUID</p>
               </div>
-              <div class="mb-4">
-                <label for="maxTime" class="mb-2 block text-xs font-medium text-slate-600">存活时间 (秒)</label>
-                <input id="maxTime" v-model="form.max_time" type="number" placeholder="3600" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400" />
-              </div>
-            </div>
 
-            <div class="grid grid-cols-2 gap-4 max-md:grid-cols-1">
+              <div>
+                <label for="maxTime" class="mb-2 block text-xs font-medium text-slate-600">存活时间 (秒)</label>
+                <input
+                  id="maxTime"
+                  v-model="form.max_time"
+                  type="number"
+                  placeholder="3600"
+                  class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                />
+              </div>
+
               <div>
                 <label for="containerCommand" class="mb-2 block text-xs font-medium text-slate-600">启动命令</label>
-                <input id="containerCommand" v-model="form.command" type="text" placeholder="可选" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400" />
+                <input
+                  id="containerCommand"
+                  v-model="form.command"
+                  type="text"
+                  placeholder="可选"
+                  class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                />
               </div>
+
               <div>
                 <label for="containerTag" class="mb-2 block text-xs font-medium text-slate-600">构建标签</label>
                 <div class="relative">
-                  <input id="containerTag" v-model="form.tag" :disabled="form.source === 'image'" type="text" :placeholder="form.source === 'image' ? '镜像模式下不可用' : '可选'" class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55" />
+                  <input
+                    id="containerTag"
+                    v-model="form.tag"
+                    :disabled="form.source === 'image'"
+                    type="text"
+                    :placeholder="form.source === 'image' ? '镜像模式下不可用' : '可选'"
+                    class="w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
+                  />
                   <div
                     v-if="form.source === 'image'"
                     class="absolute inset-0 flex items-center justify-center rounded-lg bg-slate-100/80 px-4 text-center text-xs font-medium leading-5 text-slate-600 backdrop-blur-sm"
@@ -335,14 +374,39 @@ onMounted(async () => {
                   </div>
                 </div>
               </div>
+
+              <div class="md:col-span-2">
+                <div class="mb-2 flex items-center justify-between gap-2">
+                  <label for="containerNetworkSelect" class="block text-xs font-medium text-slate-600">网络</label>
+                </div>
+
+                <div class="relative">
+                  <select
+                    id="containerNetworkSelect"
+                    v-model="form.network"
+                    class="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+                  >
+                    <option value="">默认 (bridge)</option>
+                    <option v-for="item in (store.networks.items || [])" :key="item.id || item.name" :value="item.name">
+                      {{ item.name }}
+                    </option>
+                  </select>
+                  <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500">
+                    <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                      <path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd" />
+                    </svg>
+                  </div>
+                </div>
+
+                <p class="mt-2 text-xs leading-relaxed text-slate-500">填写后，单容器将加入该 Docker network（用于容器间互通/隔离/DNS）。</p>
+              </div>
             </div>
-            <p class="mt-2 text-xs leading-relaxed text-slate-500">用户标识 (UID) 留空则自动生成 UUID</p>
           </div>
         </div>
 
         <div class="space-y-5">
 
-          <div class="rounded-md border border-slate-200 p-5 md:p-6">
+          <div class="rounded-xl border border-slate-200 p-5 md:p-6">
             <div class="mb-4 flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900">
               <svg class="h-[18px] w-[18px] flex-shrink-0 text-slate-500" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 1a4.5 4.5 0 00-4.5 4.5V9H5a2 2 0 00-2 2v6a2 2 0 002 2h10a2 2 0 002-2v-6a2 2 0 00-2-2h-.5V5.5A4.5 4.5 0 0010 1zm3 8V5.5a3 3 0 10-6 0V9h6z" clip-rule="evenodd"/></svg>
               <span>端口分配</span>
@@ -359,7 +423,6 @@ onMounted(async () => {
                 :class="{ 'text-slate-900': form.port_mode === 'random' }"
                 @click="form.port_mode = 'random'"
               >
-                <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a1 1 0 011 1v1.07a5.002 5.002 0 013.93 3.93H14a1 1 0 110 2h-1.07a5.002 5.002 0 01-3.93 3.93V14a1 1 0 11-2 0v-1.07a5.002 5.002 0 01-3.93-3.93H2a1 1 0 110-2h1.07a5.002 5.002 0 013.93-3.93V2a1 1 0 011-1zm0 4a3 3 0 100 6 3 3 0 000-6z"/></svg>
                 随机分配
               </button>
               <button
@@ -368,7 +431,6 @@ onMounted(async () => {
                 :class="{ 'text-slate-900': form.port_mode === 'fixed' }"
                 @click="form.port_mode = 'fixed'"
               >
-                <svg class="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor"><path d="M2 3.5A1.5 1.5 0 013.5 2h9A1.5 1.5 0 0114 3.5v9a1.5 1.5 0 01-1.5 1.5h-9A1.5 1.5 0 012 12.5v-9zm2 1a.5.5 0 00-.5.5v6.293l2.146-2.147a.5.5 0 01.708 0L8 10.793l2.646-2.647a.5.5 0 01.708 0L12.5 9.293V4.5a.5.5 0 00-.5-.5H4z"/></svg>
                 固定映射
               </button>
             </div>
@@ -392,7 +454,7 @@ onMounted(async () => {
             <p v-if="form.port_mode === 'random'" class="mt-2 text-xs leading-relaxed text-slate-500">系统会在给定范围内自动选择可用宿主机端口</p>
           </div>
 
-          <div class="rounded-md border border-slate-200 p-5 md:p-6">
+          <div class="rounded-xl border border-slate-200 p-5 md:p-6">
             <div class="mb-4 flex items-center gap-2 text-sm font-semibold tracking-tight text-slate-900">
               <svg class="h-[18px] w-[18px] flex-shrink-0 text-slate-500" viewBox="0 0 20 20" fill="currentColor"><path d="M13 7H7v6h6V7z"/><path fill-rule="evenodd" d="M7 2a1 1 0 012 0v1h2V2a1 1 0 112 0v1h2a2 2 0 012 2v2h1a1 1 0 110 2h-1v2h1a1 1 0 110 2h-1v2a2 2 0 01-2 2h-2v1a1 1 0 11-2 0v-1H9v1a1 1 0 11-2 0v-1H5a2 2 0 01-2-2v-2H2a1 1 0 110-2h1V9H2a1 1 0 010-2h1V5a2 2 0 012-2h2V2zM5 5h10v10H5V5z" clip-rule="evenodd"/></svg>
               <span>资源限制</span>
@@ -414,31 +476,33 @@ onMounted(async () => {
             </div>
           </div>
 
-          <div class="rounded-2xl border border-slate-200 p-4">
+          <div class="rounded-xl border border-slate-200 p-5 md:p-6">
             <div class="mb-2 flex items-center justify-between gap-2">
               <div class="flex items-center gap-2">
                 <svg class="h-[18px] w-[18px] flex-shrink-0 text-slate-500" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M2 4.75A.75.75 0 012.75 4h14.5a.75.75 0 010 1.5H2.75A.75.75 0 012 4.75zm7 10.5a.75.75 0 01.75-.75h7.5a.75.75 0 010 1.5h-7.5a.75.75 0 01-.75-.75zM2 10a.75.75 0 01.75-.75h14.5a.75.75 0 010 1.5H2.75A.75.75 0 012 10z" clip-rule="evenodd"/></svg>
                 <span class="text-sm font-semibold tracking-tight text-slate-900">环境变量</span>
                 <span class="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-[10px] font-medium text-slate-500">可选</span>
               </div>
-              <div class="flex items-center gap-2">
-                <button type="button" class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" @click="validateEnvFormat">检测格式</button>
-                <button type="button" class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px]" @click="showAdvanced = !showAdvanced">
-                  {{ showAdvanced ? '收起' : '展开' }}
-                </button>
-              </div>
             </div>
-            <div v-show="showAdvanced" class="mt-2">
-              <label for="containerEnv" class="mb-2 block text-xs font-medium text-slate-600">JSON 对象</label>
-              <textarea id="containerEnv" v-model="form.envText" rows="4" placeholder='{"ENV_VAR1": "value1", "ENV_VAR2": "value2"}' class="w-full resize-y rounded-[14px] border border-slate-200 bg-white px-3 py-2 font-mono text-[13px] text-slate-900 outline-none transition focus:border-slate-400"></textarea>
-              <p class="mt-2 text-xs leading-relaxed text-slate-500">必须是 JSON 对象格式；留空表示不传额外环境变量。</p>
+            <div class="mt-2">
+              <KeyValueLinesEditor
+                v-model="form.labelsText"
+                :rows="3"
+                placeholder="例如&#10;env=test&#10;owner=lab"
+                @validate="validateLabelFormat"
+              >
+                <template #header>
+                  <div>
+                    <p class="mt-1 text-xs text-slate-500">每行一个标签，格式 key=value。系统标签会自动补齐，不需要手填。</p>
+                  </div>
+                </template>
+              </KeyValueLinesEditor>
             </div>
           </div>
         </div>
-
       </div>
 
-      <div class="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-3.5 max-md:flex-col max-md:items-stretch max-md:text-center">
+      <div class="mt-5 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-5 py-3.5 max-md:flex-col max-md:items-stretch max-md:text-center">
         <div class="flex items-center gap-2 max-md:justify-center">
           <span v-if="form.port_mode === 'fixed' && form.port_mappings_text" class="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">端口映射: {{ form.port_mappings_text }}</span>
           <span v-else-if="form.port_mode === 'random' && (form.min_port || form.max_port)" class="rounded-full border border-slate-200 bg-white px-2.5 py-1 text-[11px] text-slate-600">端口范围: {{ form.min_port || '默认最小值' }} - {{ form.max_port || '默认最大值' }}</span>
@@ -449,7 +513,6 @@ onMounted(async () => {
         <div class="flex items-center gap-2">
           <button type="button" class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" @click="resetForm">重置</button>
           <button type="submit" class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55">
-            <svg class="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/></svg>
             创建容器
           </button>
         </div>
@@ -464,80 +527,17 @@ onMounted(async () => {
       @close="onBuildClose"
     />
 
-    <BaseModal
+    <CreatePreferencesModal
       :visible="showPreferencesModal"
-      title="偏好设置"
-      icon="bolt"
-      width="max-w-[720px]"
-      close-text="取消"
+      :image-source-loading="imageSourceLoading"
+      :image-source-saving="imageSourceSaving"
+      :limits-loading="limitsLoading"
+      :limits-saving="limitsSaving"
+      v-model:image-source-input="imageSourceInput"
+      v-model:max-containers-input="maxContainersInput"
+      v-model:max-renew-times-input="maxRenewTimesInput"
       @close="closePreferencesModal"
-    >
-      <div class="space-y-4">
-        <!-- 镜像源 -->
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3 flex items-start justify-between gap-3">
-            <div>
-              <p class="text-xs font-semibold tracking-tight text-slate-900">镜像源</p>
-              <p class="mt-1 text-xs text-slate-500">为公共镜像配置加速前缀，例如私有仓库或内部镜像站。</p>
-            </div>
-            <span
-              class="rounded-full border px-2 py-0.5 text-[11px] font-medium"
-              :class="String(imageSourceInput || '').trim() ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600'"
-            >
-              {{ String(imageSourceInput || '').trim() ? '已设置' : '未设置' }}
-            </span>
-          </div>
-          <label for="imageSourceInput" class="block text-xs font-medium text-slate-600">仓库前缀</label>
-          <input
-            id="imageSourceInput"
-            v-model="imageSourceInput"
-            type="text"
-            :disabled="imageSourceLoading || imageSourceSaving || limitsSaving"
-            placeholder="留空使用默认源，如 registry.example.com/mirror"
-            class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
-          />
-        </div>
-
-        <!-- 容器上限 -->
-        <div class="rounded-2xl border border-slate-200 bg-white p-4">
-          <div class="mb-3">
-            <p class="text-xs font-semibold tracking-tight text-slate-900">容器上限</p>
-            <p class="mt-1 text-xs text-slate-500">限制单实例可创建的最大容器数量与可续期次数。</p>
-          </div>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <div>
-              <label for="maxContainersInput" class="block text-xs font-medium text-slate-600">最大容器数</label>
-              <input
-                id="maxContainersInput"
-                v-model="maxContainersInput"
-                type="number"
-                min="1"
-                :disabled="limitsLoading || limitsSaving || imageSourceSaving"
-                placeholder="默认 30"
-                class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
-              />
-            </div>
-            <div>
-              <label for="maxRenewTimesInput" class="block text-xs font-medium text-slate-600">最大续期次数</label>
-              <input
-                id="maxRenewTimesInput"
-                v-model="maxRenewTimesInput"
-                type="number"
-                min="0"
-                :disabled="limitsLoading || limitsSaving || imageSourceSaving"
-                placeholder="默认 3"
-                class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
-              />
-            </div>
-          </div>
-        </div>
-      </div>
-      <template #footer>
-        <button type="button" class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3.5 text-sm font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" @click="closePreferencesModal">取消</button>
-        <button type="button" class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="imageSourceLoading || imageSourceSaving || limitsLoading || limitsSaving" @click="savePreferences">
-          {{ (imageSourceSaving || limitsSaving) ? '保存中...' : '保存' }}
-        </button>
-      </template>
-    </BaseModal>
+      @save="savePreferences"
+    />
   </section>
 </template>
