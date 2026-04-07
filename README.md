@@ -4,7 +4,7 @@ MoeGate 支持通过 **Dockerfile / Docker Compose / 镜像名称** 一键创建
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![Flask](https://img.shields.io/badge/Flask-2.x-black) ![Docker](https://img.shields.io/badge/Docker-Engine-2496ED)
 
-![示例截图](https://github.com/user-attachments/assets/a087c14f-fab2-4748-a00a-173fa8ff0d65)
+![示例截图](https://github.com/user-attachments/assets/dd2d13d5-9ffb-4869-b954-0626a93028c0)
 
 ## 功能特性
 - **多模式创建**：支持 Dockerfile 构建、Docker Compose 编排、直接拉取镜像
