@@ -7,6 +7,7 @@ from services.container import (
     list_containers,
     restart_container,
     restart_compose_project,
+    restart_any,
     stop_container,
     stop_compose_project,
     stop_any,
@@ -14,6 +15,7 @@ from services.container import (
     get_compose_project_destroy_status,
     renew_task,
     renew_compose_project,
+    renew_any,
     get_container_detail,
     get_compose_project_detail,
 )
@@ -191,6 +193,26 @@ def delete_any(entity_id: str):
     """统一删除入口：自动识别是 Compose 项目还是单容器（异步任务，返回 202）。"""
     dto = {"id": entity_id}
     return handle_service_call(stop_any, "删除任务已提交", 202, dto)
+
+
+@bp.route("/containers/restart/<entity_id>", methods=["PATCH"])
+@require_api_key
+@log_request("重启实体(自动识别容器/项目)")
+@rate_limit(max_per_min=30)
+def restart_any_route(entity_id: str):
+    """统一重启入口：自动识别是 Compose 项目还是单容器。"""
+    dto = {"id": entity_id}
+    return handle_service_call(restart_any, "重启成功", 200, dto)
+
+
+@bp.route("/containers/renew/<entity_id>", methods=["POST"])
+@require_api_key
+@log_request("续期实体(自动识别容器/项目)")
+@rate_limit(max_per_min=30)
+def renew_any_route(entity_id: str):
+    """统一续期入口：自动识别是 Compose 项目还是单容器。"""
+    dto = {"id": entity_id}
+    return handle_service_call(renew_any, "续期成功", 200, dto, app_config=config)
 
 
 @bp.route("/containers/<container_id>/destroy-status", methods=["GET"])

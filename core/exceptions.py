@@ -50,6 +50,11 @@ class ImageBuildError(ContainerServiceError):
         super().__init__(f"镜像构建失败: {message}", 500)
 
 
+class NetworkProvisionError(ContainerServiceError):
+    def __init__(self, message: str):
+        super().__init__(message, 503)
+
+
 class MaxRenewTimesExceededError(ContainerServiceError):
     def __init__(self, container_id: str, current: int, max_times: int):
-        super().__init__("容器续期次数已达上限，无法续期", 400)
+        super().__init__(f"容器 {container_id} 续期次数已达上限 ({current}/{max_times})，无法续期", 400)

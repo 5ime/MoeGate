@@ -13,6 +13,7 @@ from config.settings import config as default_config, AppConfig
 from core.exceptions import (
     DockerConnectionError,
     ImageBuildError,
+    NetworkProvisionError,
     PortUnavailableError,
 )
 from infra.docker import (
@@ -24,6 +25,109 @@ from services.container.info import get_container_info
 from utils.port_utils import release_port
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_docker_error_message(exc: Exception) -> str:
+    """提取 Docker SDK 异常中的可读错误信息。"""
+    explanation = getattr(exc, "explanation", None)
+    if isinstance(explanation, bytes):
+        try:
+            explanation = explanation.decode("utf-8", errors="ignore")
+        except Exception:
+            explanation = None
+
+    message = str(explanation or exc or "").strip()
+    return message or "Docker 操作失败"
+
+
+def _is_network_pool_exhausted_error(exc: Exception) -> bool:
+    """判断是否为 Docker 默认地址池耗尽错误。"""
+    message = _extract_docker_error_message(exc).lower()
+    return (
+        "all predefined address pools have been fully subnetted" in message
+        or "could not find an available, non-overlapping ipv4 address pool" in message
+    )
+
+
+def _prune_unused_managed_networks(client, exclude_names: Optional[List[str]] = None) -> List[str]:
+    """清理未被容器占用的 MoeGate 受管网络。"""
+    if client is None:
+        return []
+
+    excluded = {str(name).strip() for name in (exclude_names or []) if str(name).strip()}
+    removed_networks: List[str] = []
+
+    try:
+        networks = client.networks.list(filters={"label": ["moegate.managed=true"]})
+    except Exception as exc:
+        logger.warning("列出受管网络失败，跳过自动清理: %s", exc)
+        return removed_networks
+
+    for network in networks:
+        network_name = str(getattr(network, "name", "") or "").strip()
+        if not network_name or network_name in excluded:
+            continue
+
+        try:
+            attrs = getattr(network, "attrs", None) or {}
+            if not attrs and hasattr(network, "reload"):
+                network.reload()
+                attrs = getattr(network, "attrs", None) or {}
+
+            labels = attrs.get("Labels") or {}
+            if labels.get("moegate.managed") != "true":
+                continue
+
+            attached_containers = attrs.get("Containers") or {}
+            if attached_containers:
+                continue
+
+            network.remove()
+            removed_networks.append(network_name)
+        except Exception as exc:
+            logger.warning("清理受管网络失败: %s, err=%s", network_name, exc)
+
+    return removed_networks
+
+
+def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], compose_project_id: str):
+    """创建 Compose 网络，地址池耗尽时尝试清理闲置受管网络后重试一次。"""
+    create_kwargs = {
+        "driver": str(cfg.get("driver") or "bridge"),
+        "attachable": bool(cfg.get("attachable", False)),
+        "labels": {
+            "moegate.managed": "true",
+            "moegate.compose_project_id": compose_project_id,
+        },
+    }
+
+    try:
+        client.networks.create(resolved_name, **create_kwargs)
+        return
+    except docker.errors.APIError as exc:
+        if not _is_network_pool_exhausted_error(exc):
+            raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
+
+        removed_networks = _prune_unused_managed_networks(client, exclude_names=[resolved_name])
+        if removed_networks:
+            logger.warning(
+                "Docker 网络地址池耗尽，已清理 %d 个未使用的 MoeGate 网络后重试: %s",
+                len(removed_networks),
+                ", ".join(removed_networks),
+            )
+        else:
+            raise NetworkProvisionError(
+                "Docker 网络地址池已耗尽，无法为 Compose 项目创建网络。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
+            )
+
+    try:
+        client.networks.create(resolved_name, **create_kwargs)
+    except docker.errors.APIError as exc:
+        if _is_network_pool_exhausted_error(exc):
+            raise NetworkProvisionError(
+                "Docker 网络地址池已耗尽，已尝试清理未使用的 MoeGate 网络但仍无法分配子网。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
+            )
+        raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
 
 
 def _resolve_image_reference(image: str, image_source: Optional[str] = None) -> str:
@@ -435,6 +539,7 @@ def start_container_from_source(file_path: str, app_config: AppConfig = None, **
         'port_mappings': params.get('port_mappings'),
         'resource_limits': params.get('resource_limits'),
         'meta': params.get('meta'),
+        'network': params.get('network'),
     }
     return start_from_dockerfile(app_config=app_config, **dockerfile_params)
 
@@ -477,6 +582,7 @@ def start_container_from_source_streaming(file_path: str, app_config: AppConfig 
         'port_mappings': params.get('port_mappings'),
         'resource_limits': params.get('resource_limits'),
         'meta': params.get('meta'),
+        'network': params.get('network'),
     }
     yield from _start_from_dockerfile_streaming(app_config=app_config, **dockerfile_params)
 
@@ -486,6 +592,7 @@ def start_from_dockerfile(path: str, uid: int, cmd: Optional[str], min_port: int
                           port_mappings: Optional[List[Tuple[str, int]]] = None,
                           resource_limits: Optional[Dict[str, Any]] = None,
                           meta: Optional[Dict[str, Any]] = None,
+                          network: Optional[str] = None,
                           app_config: AppConfig = None) -> Dict[str, Any]:
     """从Dockerfile启动容器
     
@@ -538,6 +645,8 @@ def start_from_dockerfile(path: str, uid: int, cmd: Optional[str], min_port: int
         ports=ports,
         command=cmd,
         environment=env,
+        network=network,
+        network_mode=None if network else "bridge",
         resource_limits=resource_limits,
         app_config=app_config
     )
@@ -839,15 +948,7 @@ def _ensure_compose_networks(client, compose_content: Dict[str, Any], compose_pr
         if existing:
             continue
 
-        client.networks.create(
-            resolved_name,
-            driver=str(cfg.get("driver") or "bridge"),
-            attachable=bool(cfg.get("attachable", False)),
-            labels={
-                "moegate.managed": "true",
-                "moegate.compose_project_id": compose_project_id,
-            },
-        )
+        _create_compose_network(client, resolved_name, cfg, compose_project_id)
         created_networks.append(resolved_name)
 
     return mapping, created_networks
@@ -857,7 +958,7 @@ def _start_from_dockerfile_streaming(path: str, uid, cmd, min_port: int,
                                      max_port: int, max_time: int, env: Dict, tag,
                                      port_mappings: Optional[List[Tuple[str, int]]] = None,
                                      resource_limits: Optional[Dict[str, Any]] = None,
-                                     meta=None, app_config: AppConfig = None):
+                                     meta=None, network: Optional[str] = None, app_config: AppConfig = None):
     """从 Dockerfile 启动容器（流式版本）。
 
     Yields:
@@ -902,7 +1003,12 @@ def _start_from_dockerfile_streaming(path: str, uid, cmd, min_port: int,
 
     create_kwargs = build_container_create_kwargs(
         image=image.id, name=container_name, ports=ports,
-        command=cmd, environment=env, resource_limits=resource_limits, app_config=app_config
+        command=cmd,
+        environment=env,
+        network=network,
+        network_mode=None if network else "bridge",
+        resource_limits=resource_limits,
+        app_config=app_config
     )
     reserved_ports = _extract_host_ports_from_bindings(ports)
 
@@ -1065,6 +1171,7 @@ def start_from_image(
     port_mappings: Optional[List[Tuple[str, int]]] = None,
     resource_limits: Optional[Dict[str, Any]] = None,
     meta: Optional[Dict[str, Any]] = None,
+    network: Optional[str] = None,
     app_config: AppConfig = None,
     **_extra,
 ) -> Dict[str, Any]:
@@ -1105,6 +1212,8 @@ def start_from_image(
         ports=ports,
         command=cmd,
         environment=env,
+        network=network,
+        network_mode=None if network else "bridge",
         resource_limits=resource_limits,
         app_config=app_config,
     )
@@ -1164,6 +1273,7 @@ def start_from_image_streaming(
     port_mappings: Optional[List[Tuple[str, int]]] = None,
     resource_limits: Optional[Dict[str, Any]] = None,
     meta=None,
+    network: Optional[str] = None,
     app_config: AppConfig = None,
     **_extra,
 ):
@@ -1206,6 +1316,8 @@ def start_from_image_streaming(
         ports=ports,
         command=cmd,
         environment=env,
+        network=network,
+        network_mode=None if network else "bridge",
         resource_limits=resource_limits,
         app_config=app_config,
     )

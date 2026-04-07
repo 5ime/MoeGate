@@ -6,6 +6,7 @@ from config.settings import config as default_config, AppConfig
 from core.exceptions import (
     ValidationError,
     ContainerNotFoundError,
+    ManagedEntityNotFoundError,
     MaxRenewTimesExceededError,
 )
 from utils.destroy import (
@@ -292,6 +293,44 @@ def stop_any(data: Dict[str, Any]) -> Dict[str, Any]:
     return {"kind": "compose_project", **result}
 
 
+def restart_any(data: Dict[str, Any]) -> Dict[str, Any]:
+    """统一重启入口：自动识别 Compose 项目或单容器。"""
+    entity_id = data.get("id") or data.get("entity_id") or data.get("container_id") or data.get("compose_project_id")
+    if not entity_id:
+        raise ValidationError("缺少 id 参数")
+
+    compose_containers = _find_compose_project_containers(entity_id)
+    if compose_containers:
+        result = restart_compose_project({"compose_project_id": entity_id})
+        return {"kind": "compose_project", **result}
+
+    container = _resolve_managed_container(entity_id)
+    if container is not None:
+        result = restart_container({"container_id": entity_id})
+        return {"kind": "container", **result}
+
+    raise ManagedEntityNotFoundError(entity_id)
+
+
+def renew_any(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
+    """统一续期入口：自动识别 Compose 项目或单容器。"""
+    entity_id = data.get("id") or data.get("entity_id") or data.get("container_id") or data.get("compose_project_id")
+    if not entity_id:
+        raise ValidationError("缺少 id 参数")
+
+    compose_containers = _find_compose_project_containers(entity_id)
+    if compose_containers:
+        result = renew_compose_project({"compose_project_id": entity_id}, app_config=app_config)
+        return {"kind": "compose_project", **result}
+
+    container = _resolve_managed_container(entity_id)
+    if container is not None:
+        result = renew_task({"container_id": entity_id}, app_config=app_config)
+        return {"kind": "container", **result}
+
+    raise ManagedEntityNotFoundError(entity_id)
+
+
 def get_destroy_status(data: Dict[str, Any]) -> Dict[str, Any]:
     """获取容器异步销毁任务状态。"""
     container_id = data.get("container_id")
@@ -401,14 +440,21 @@ def renew_compose_project(data: Dict[str, Any], app_config: AppConfig = None) ->
     containers = _list_compose_project_containers(compose_project_id)
 
     manager = get_container_manager()
-    results = []
+    pending_counts = {}
     for container in containers:
         manager.add_container(container.id, container)
+        current_count = manager.get_renew_count(container.id)
+        if current_count + 1 > max_renew_times:
+            raise MaxRenewTimesExceededError(container.id, current_count, max_renew_times)
+        pending_counts[container.id] = current_count + 1
+
+    results = []
+    for container in containers:
         manager.renew(container.id, max_time, max_renew_times)
         results.append(
             {
                 "container_id": container.id,
-                "renew_count": manager.get_renew_count(container.id),
+                "renew_count": pending_counts[container.id],
             }
         )
 

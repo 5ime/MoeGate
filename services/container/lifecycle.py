@@ -208,6 +208,15 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
     resource_limits = _extract_resource_limits(data)
     port_mappings = _extract_port_mappings(data)
 
+    # 可选：指定容器加入某个 Docker network（用于容器间互通/隔离/DNS）
+    network = data.get("network")
+    if network is not None:
+        network = str(network).strip()
+        if not network:
+            raise ValidationError("network 不能为空")
+        if len(network) > 255:
+            raise ValidationError("network 过长")
+
     has_min_port = data.get("min_port") is not None
     has_max_port = data.get("max_port") is not None
     if port_mappings and (has_min_port or has_max_port):
@@ -240,6 +249,7 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
         "meta": data.get("_meta", {}),
         "resource_limits": resource_limits,
         "port_mappings": port_mappings,
+        "network": network,
     }
 
 
