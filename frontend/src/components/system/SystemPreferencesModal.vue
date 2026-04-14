@@ -8,6 +8,7 @@ const props = defineProps({
   visible: { type: Boolean, default: false },
   saving: { type: Boolean, default: false },
   testSending: { type: Boolean, default: false },
+  imageSource: { type: String, default: '' },
   webhookUrl: { type: String, default: '' },
   webhookTimeout: { type: String, default: '5' },
   perfInterval: { type: String, default: '300' },
@@ -22,6 +23,7 @@ const emit = defineEmits([
   'close',
   'save',
   'send-test',
+  'update:imageSource',
   'update:webhookUrl',
   'update:webhookTimeout',
   'update:perfInterval',
@@ -43,12 +45,32 @@ function updateField(field, event) {
   <BaseModal
     :visible="visible"
     title="偏好设置"
-    subtitle="Webhook 填写后默认启用资源告警；阈值/采样间隔会实时生效"
+    subtitle="镜像源、Webhook 与资源告警策略统一在此维护"
     icon="bolt"
     width="max-w-[880px]"
     @close="emit('close')"
   >
     <div class="space-y-4">
+      <div>
+        <SectionCard title="镜像源" description="为镜像拉取与按镜像创建容器提供统一仓库前缀。">
+          <template #header>
+            <span
+              class="inline-flex items-center rounded-full border px-2 py-0.5 text-[11px] font-medium"
+              :class="String(imageSource || '').trim() ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-slate-50 text-slate-600'"
+            >{{ String(imageSource || '').trim() ? '已设置' : '未设置' }}</span>
+          </template>
+
+          <label class="block text-xs font-medium text-slate-600">仓库前缀</label>
+          <input
+            :value="imageSource"
+            class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm outline-none transition focus:border-slate-400"
+            placeholder="例如：docker.1ms.run 或 registry.example.com/mirror"
+            @input="updateField('imageSource', $event)"
+          />
+          <p class="mt-2 text-xs leading-5 text-slate-500">留空则直接使用原始镜像名；设置后会自动为未带 registry 的镜像补前缀。</p>
+        </SectionCard>
+      </div>
+
       <div>
         <SectionCard title="Webhook" description="填写后默认启用资源告警，并可用于容器异常通知。">
           <template #header>

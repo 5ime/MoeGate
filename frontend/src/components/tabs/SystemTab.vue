@@ -1,26 +1,13 @@
 <script setup>
-import { computed, onMounted, ref } from 'vue';
-import { loadAlertWebhookSetting, loadAlertPerfSettings, loadSystemPanel, saveAlertPerfSettings, saveAlertWebhookSetting, sendAlertWebhookTest, showMessage, store } from '../../stores/appStore';
+import { inject, onMounted, ref } from 'vue';
+import { loadSystemPanel, showMessage, store } from '../../stores/appStore';
 import TrendChart from '../charts/TrendChart.vue';
-import SystemPreferencesModal from '../system/SystemPreferencesModal.vue';
 import StatCard from '../ui/StatCard.vue';
 import SectionCard from '../ui/SectionCard.vue';
 
 const refreshing = ref(false);
-const preferencesModal = ref(false);
 const preferencesLoading = ref(false);
-const preferencesSaving = ref(false);
-const testSending = ref(false);
-const webhookUrl = ref('');
-const webhookTimeout = ref('5');
-const perfInterval = ref('300');
-const cpuThreshold = ref('95');
-const cpuIntervals = ref('3');
-const memThreshold = ref('90');
-const memIntervals = ref('3');
-const cooldownSec = ref('900');
-
-const webhookEnabled = computed(() => Boolean(String(webhookUrl.value || '').trim()));
+const openSystemPreferences = inject('openSystemPreferences', null);
 
 async function refresh() {
   try {
@@ -34,61 +21,19 @@ async function refresh() {
 }
 
 async function openPreferences() {
+  if (preferencesLoading.value) return;
+  if (typeof openSystemPreferences !== 'function') {
+    showMessage('系统偏好入口不可用', 'error');
+    return;
+  }
+
   preferencesLoading.value = true;
   try {
-    const data = await loadAlertWebhookSetting();
-    webhookUrl.value = String(data?.webhookUrl || '');
-    webhookTimeout.value = String(data?.webhookTimeout ?? 5);
-
-    const perf = await loadAlertPerfSettings();
-    perfInterval.value = String(perf?.performanceLogInterval ?? 300);
-    cpuThreshold.value = String(perf?.alertCpuThreshold ?? 95);
-    cpuIntervals.value = String(perf?.alertCpuSustainedIntervals ?? 3);
-    memThreshold.value = String(perf?.alertMemThreshold ?? 90);
-    memIntervals.value = String(perf?.alertMemSustainedIntervals ?? 3);
-    cooldownSec.value = String(perf?.alertCooldownSec ?? 900);
-    preferencesModal.value = true;
+    await openSystemPreferences();
   } catch (error) {
     showMessage(error.message || '加载偏好设置失败', 'error');
   } finally {
     preferencesLoading.value = false;
-  }
-}
-
-async function savePreferences() {
-  preferencesSaving.value = true;
-  try {
-    const [r1, r2] = await Promise.all([
-      saveAlertWebhookSetting(webhookUrl.value, webhookTimeout.value),
-      saveAlertPerfSettings({
-        performanceLogInterval: Number(perfInterval.value),
-        alertCpuThreshold: Number(cpuThreshold.value),
-        alertCpuSustainedIntervals: Number(cpuIntervals.value),
-        alertMemThreshold: Number(memThreshold.value),
-        alertMemSustainedIntervals: Number(memIntervals.value),
-        alertCooldownSec: Number(cooldownSec.value),
-      }),
-    ]);
-    const msg = String((r2?.msg || r1?.msg) || '偏好设置已保存');
-    showMessage(msg, 'success');
-    preferencesModal.value = false;
-    await refresh();
-  } catch (error) {
-    showMessage(error.message || '保存偏好设置失败', 'error');
-  } finally {
-    preferencesSaving.value = false;
-  }
-}
-
-async function sendTest() {
-  testSending.value = true;
-  try {
-    const result = await sendAlertWebhookTest();
-    showMessage(String(result?.msg || '测试消息已发送'), 'success');
-  } catch (error) {
-    showMessage(error.message || '发送测试消息失败', 'error');
-  } finally {
-    testSending.value = false;
   }
 }
 
@@ -109,7 +54,7 @@ onMounted(() => {
           <button
             id="openSystemPreferencesBtn"
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
-            :disabled="preferencesLoading || preferencesSaving || refreshing"
+            :disabled="preferencesLoading || refreshing"
             @click="openPreferences"
           >偏好设置</button>
           <button
@@ -197,22 +142,5 @@ onMounted(() => {
       </div>
       <pre class="mt-1.5 max-h-[430px] overflow-auto rounded-xl border border-slate-200 bg-[#fbfbfc] p-3 font-mono text-xs leading-relaxed text-slate-900">{{ store.metricsText || '# 暂无指标' }}</pre>
     </div>
-
-    <SystemPreferencesModal
-      :visible="preferencesModal"
-      :saving="preferencesSaving"
-      :test-sending="testSending"
-      v-model:webhook-url="webhookUrl"
-      v-model:webhook-timeout="webhookTimeout"
-      v-model:perf-interval="perfInterval"
-      v-model:cpu-threshold="cpuThreshold"
-      v-model:cpu-intervals="cpuIntervals"
-      v-model:mem-threshold="memThreshold"
-      v-model:mem-intervals="memIntervals"
-      v-model:cooldown-sec="cooldownSec"
-      @close="preferencesModal = false"
-      @save="savePreferences"
-      @send-test="sendTest"
-    />
   </section>
 </template>

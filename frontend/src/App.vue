@@ -1,20 +1,30 @@
 <script setup>
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from 'vue';
 import BaseModal from './components/BaseModal.vue';
 import ContainersTab from './components/tabs/ContainersTab.vue';
 import CreateTab from './components/tabs/CreateTab.vue';
 import FrpTab from './components/tabs/FrpTab.vue';
+import ImagesTab from './components/tabs/ImagesTab.vue';
 import NetworksTab from './components/tabs/NetworksTab.vue';
 import SystemTab from './components/tabs/SystemTab.vue';
+import SystemPreferencesModal from './components/system/SystemPreferencesModal.vue';
 import { API_PREFIX, apiRequest, getApiBase, setApiBase } from './api/client';
 import {
   isLoggedIn,
+  loadAlertPerfSettings,
+  loadAlertWebhookSetting,
   loadFrpPanel,
+  loadImageSourceSetting,
+  refreshImagesPanel,
   refreshNetworksPanel,
   loadSystemPanel,
   login,
   logout,
   refreshContainersPanel,
+  saveAlertPerfSettings,
+  saveAlertWebhookSetting,
+  saveImageSourceSetting,
+  sendAlertWebhookTest,
   showMessage,
   store,
 } from './stores/appStore';
@@ -26,14 +36,16 @@ const currentYear = new Date().getFullYear();
 
 const tabs = [
   { key: 'containers', label: '容器', desc: '容器与 Compose 管理' },
-  { key: 'networks', label: '网络', desc: '受管容器网络与占用状态' },
   { key: 'create', label: '创建', desc: '快速创建与高级参数' },
+  { key: 'images', label: '镜像', desc: '受管镜像与拉取清理' },
+  { key: 'networks', label: '网络', desc: '受管容器网络与占用状态' },
   { key: 'frp', label: 'FRP', desc: '内网穿透与健康检查' },
   { key: 'system', label: '系统', desc: '运行状态与分布式信息' },
 ];
 
 const tabLoaders = {
   containers: refreshContainersPanel,
+  images: refreshImagesPanel,
   networks: refreshNetworksPanel,
   create: async () => {},
   frp: loadFrpPanel,
@@ -42,14 +54,28 @@ const tabLoaders = {
 
 const validTabKeys = new Set(tabs.map((tab) => tab.key));
 const authApiKey = ref('');
+const authApiBase = ref('');
 const loginPending = ref(false);
 const loginError = ref('');
 const authApiKeyInput = ref(null);
 const showSettings = ref(false);
+const showSystemPreferences = ref(false);
 const settingsApiBase = ref('');
 const settingsPollSec = ref('');
 const runtimeApiBase = ref('');
 const runtimePollSec = ref('30');
+const systemPreferencesLoading = ref(false);
+const systemPreferencesSaving = ref(false);
+const systemTestSending = ref(false);
+const imageSourceInput = ref('');
+const webhookUrl = ref('');
+const webhookTimeout = ref('5');
+const perfInterval = ref('300');
+const cpuThreshold = ref('95');
+const cpuIntervals = ref('3');
+const memThreshold = ref('90');
+const memIntervals = ref('3');
+const cooldownSec = ref('900');
 const initialLoading = ref(false);
 // 初始加载遮罩：性能优先
 // - 延迟显示：短任务不显示，避免闪烁与额外渲染
@@ -103,6 +129,7 @@ const pollDisplay = computed(() => `${runtimePollSec.value} 秒`);
 const activeTab = computed(() => tabs.find((tab) => tab.key === store.activeTab) || tabs[0]);
 const tabComponentMap = {
   containers: ContainersTab,
+  images: ImagesTab,
   networks: NetworksTab,
   create: CreateTab,
   frp: FrpTab,
@@ -113,7 +140,13 @@ const activeTabComponent = computed(() => tabComponentMap[normalizeTabKey(store.
 
 const tabNavEl = ref(null);
 const tabEls = ref({});
-const tabIndicator = ref({ left: 0, width: 0 });
+const tabIndicatorStyle = ref({
+  opacity: 0,
+  left: '0px',
+  width: '0px',
+  height: '38px',
+});
+const handleWindowResize = () => updateTabIndicator();
 
 const activeTabProps = computed(() => {
   if (store.activeTab === 'containers') {
@@ -196,6 +229,80 @@ function closeSettings() {
   showSettings.value = false;
 }
 
+async function openSystemPreferences() {
+  if (systemPreferencesLoading.value) return;
+
+  systemPreferencesLoading.value = true;
+  try {
+    const [imageSource, webhook, perf] = await Promise.all([
+      loadImageSourceSetting(),
+      loadAlertWebhookSetting(),
+      loadAlertPerfSettings(),
+    ]);
+    imageSourceInput.value = String(imageSource || '');
+    webhookUrl.value = String(webhook?.webhookUrl || '');
+    webhookTimeout.value = String(webhook?.webhookTimeout ?? 5);
+    perfInterval.value = String(perf?.performanceLogInterval ?? 300);
+    cpuThreshold.value = String(perf?.alertCpuThreshold ?? 95);
+    cpuIntervals.value = String(perf?.alertCpuSustainedIntervals ?? 3);
+    memThreshold.value = String(perf?.alertMemThreshold ?? 90);
+    memIntervals.value = String(perf?.alertMemSustainedIntervals ?? 3);
+    cooldownSec.value = String(perf?.alertCooldownSec ?? 900);
+    showSystemPreferences.value = true;
+  } catch (error) {
+    showMessage(error.message || '加载系统偏好失败', 'error');
+  } finally {
+    systemPreferencesLoading.value = false;
+  }
+}
+
+function closeSystemPreferences() {
+  showSystemPreferences.value = false;
+}
+
+async function saveSystemPreferences() {
+  systemPreferencesSaving.value = true;
+  try {
+    const [imageResult, webhookResult, perfResult] = await Promise.all([
+      saveImageSourceSetting(imageSourceInput.value),
+      saveAlertWebhookSetting(webhookUrl.value, webhookTimeout.value),
+      saveAlertPerfSettings({
+        performanceLogInterval: Number(perfInterval.value),
+        alertCpuThreshold: Number(cpuThreshold.value),
+        alertCpuSustainedIntervals: Number(cpuIntervals.value),
+        alertMemThreshold: Number(memThreshold.value),
+        alertMemSustainedIntervals: Number(memIntervals.value),
+        alertCooldownSec: Number(cooldownSec.value),
+      }),
+    ]);
+    imageSourceInput.value = store.settings.imageSource;
+    const msg = String((perfResult?.msg || webhookResult?.msg || imageResult?.msg) || '系统偏好已保存');
+    showMessage(msg, 'success');
+    closeSystemPreferences();
+    if (store.activeTab === 'system') {
+      await loadSystemPanel().catch(() => {});
+    }
+  } catch (error) {
+    showMessage(error.message || '保存系统偏好失败', 'error');
+  } finally {
+    systemPreferencesSaving.value = false;
+  }
+}
+
+async function sendSystemWebhookTest() {
+  systemTestSending.value = true;
+  try {
+    const result = await sendAlertWebhookTest();
+    showMessage(String(result?.msg || '测试消息已发送'), 'success');
+  } catch (error) {
+    showMessage(error.message || '发送测试消息失败', 'error');
+  } finally {
+    systemTestSending.value = false;
+  }
+}
+
+provide('openSystemPreferences', openSystemPreferences);
+
 async function saveSettings() {
   try {
     const apiBaseText = String(settingsApiBase.value || '').trim();
@@ -275,13 +382,22 @@ function setTabEl(key, el) {
 }
 
 function updateTabIndicator() {
-  const nav = tabNavEl.value;
-  const el = tabEls.value?.[store.activeTab];
-  if (!nav || !el) return;
-  tabIndicator.value = {
-    left: el.offsetLeft,
-    width: el.offsetWidth,
-  };
+  nextTick(() => {
+    const nav = tabNavEl.value;
+    const el = tabEls.value?.[store.activeTab];
+    if (!nav || !el) return;
+
+    const width = el.offsetWidth;
+    const height = el.offsetHeight;
+    if (!Number.isFinite(width) || width <= 0) return;
+
+    tabIndicatorStyle.value = {
+      opacity: 1,
+      left: `${el.offsetLeft}px`,
+      width: `${width}px`,
+      height: `${height}px`,
+    };
+  });
 }
 
 async function refreshActiveTab() {
@@ -290,6 +406,7 @@ async function refreshActiveTab() {
 
 async function onLogin() {
   const apiKey = authApiKey.value.trim();
+  const apiBase = String(authApiBase.value || '').trim();
   if (!apiKey) {
     loginError.value = '请输入 API Key';
     showMessage(loginError.value, 'error');
@@ -302,6 +419,8 @@ async function onLogin() {
   loginPending.value = true;
   const loadSeq = startInitialLoading();
   try {
+    setApiBase(apiBase);
+    syncRuntimeSettings();
     await verifyApiKey(apiKey);
     login(apiKey);
     await loadPersistedWebUiSettings();
@@ -346,12 +465,13 @@ watch(
 );
 
 watch(() => store.activeTab, async () => {
-  await nextTick();
   updateTabIndicator();
 });
 
 onMounted(async () => {
+  window.addEventListener('resize', handleWindowResize);
   syncRuntimeSettings();
+  authApiBase.value = runtimeApiBase.value;
   store.activeTab = getTabFromHash();
   updateHashForTab(store.activeTab, {
     replace:
@@ -370,13 +490,13 @@ onMounted(async () => {
   await runTabLoader(store.activeTab);
   startAutoRefresh();
   await stopInitialLoading(loadSeq);
-  await nextTick();
   updateTabIndicator();
 });
 
 onUnmounted(() => {
   stopAutoRefresh();
   window.removeEventListener('hashchange', onHashChange);
+  window.removeEventListener('resize', handleWindowResize);
 });
 </script>
 
@@ -395,7 +515,7 @@ onUnmounted(() => {
     </div>
 
     <div id="authOverlay" v-show="!loggedIn" class="fixed inset-0 z-[10000] flex items-center justify-center bg-black/30 p-5 backdrop-blur-md">
-      <div class="login-panel w-full max-w-[430px] rounded-[22px] border border-slate-200/80 bg-white p-8 shadow-[0_10px_40px_-16px_rgba(10,12,18,0.2)]">
+      <div class="login-panel w-full max-w-[500px] rounded-[22px] border border-slate-200/80 bg-white p-8 shadow-[0_10px_40px_-16px_rgba(10,12,18,0.2)]">
         <div class="mb-5 flex items-center gap-3">
           <div class="flex h-10 w-10 items-center justify-center rounded-[12px] bg-[linear-gradient(150deg,#0f1013,#2a2d33)] text-lg font-semibold text-white shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]">M</div>
           <div>
@@ -404,6 +524,16 @@ onUnmounted(() => {
           </div>
         </div>
         <form id="loginForm" class="mb-2 mt-2 flex flex-col gap-3" @submit.prevent="onLogin">
+          <label for="authApiBase" class="text-sm font-medium text-slate-900">API Base</label>
+          <input
+            id="authApiBase"
+            v-model="authApiBase"
+            type="text"
+            placeholder="留空使用当前站点"
+            :disabled="loginPending"
+            class="w-full rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-900 transition focus:border-slate-400 focus:outline-none focus:ring-4 focus:ring-slate-100"
+          />
+          <p class="-mt-1 text-xs leading-5 text-slate-500">分离部署首次访问时请先填写后端 API 地址；填写后会保存在当前浏览器。</p>
           <label for="authApiKey" class="text-sm font-medium text-slate-900">API Key</label>
           <input
             id="authApiKey"
@@ -446,10 +576,10 @@ onUnmounted(() => {
 
       <div class="tab-nav-wrap border-b border-slate-100 px-6 md:px-8">
         <div class="flex flex-wrap items-center justify-between gap-2 py-3">
-          <div ref="tabNavEl" class="relative flex gap-2 overflow-x-auto py-0">
+          <div ref="tabNavEl" class="relative isolate flex gap-2 overflow-x-auto py-0">
           <div
-            class="pointer-events-none absolute left-0 top-1/2 h-[38px] w-0 -translate-y-1/2 rounded-[12px] border border-slate-300 bg-white shadow-[0_6px_20px_-16px_rgba(12,14,18,0.45)] transition-[transform,width] duration-[220ms] [transition-timing-function:cubic-bezier(0.2,0.8,0.2,1)] will-change-[transform,width]"
-            :style="{ transform: `translate(${tabIndicator.left}px, -50%)`, width: `${tabIndicator.width}px` }"
+            class="pointer-events-none absolute top-1/2 -z-10 rounded-[12px] border border-slate-300 bg-white shadow-[0_10px_24px_-18px_rgba(12,14,18,0.4)] transition-all duration-300 ease-[cubic-bezier(0.4,0,0.2,1)]"
+            :style="{ opacity: tabIndicatorStyle.opacity, left: tabIndicatorStyle.left, width: tabIndicatorStyle.width, height: tabIndicatorStyle.height, transform: 'translateY(-50%)' }"
             aria-hidden="true"
           ></div>
           <button
@@ -560,6 +690,24 @@ onUnmounted(() => {
           <button id="saveSettingsBtn" class="inline-flex h-9 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3.5 text-sm font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" @click="saveSettings">保存设置</button>
       </template>
     </BaseModal>
+
+    <SystemPreferencesModal
+      :visible="showSystemPreferences"
+      :saving="systemPreferencesSaving"
+      :test-sending="systemTestSending"
+      v-model:image-source="imageSourceInput"
+      v-model:webhook-url="webhookUrl"
+      v-model:webhook-timeout="webhookTimeout"
+      v-model:perf-interval="perfInterval"
+      v-model:cpu-threshold="cpuThreshold"
+      v-model:cpu-intervals="cpuIntervals"
+      v-model:mem-threshold="memThreshold"
+      v-model:mem-intervals="memIntervals"
+      v-model:cooldown-sec="cooldownSec"
+      @close="closeSystemPreferences"
+      @save="saveSystemPreferences"
+      @send-test="sendSystemWebhookTest"
+    />
 
     <Teleport to="body">
       <transition name="toast">

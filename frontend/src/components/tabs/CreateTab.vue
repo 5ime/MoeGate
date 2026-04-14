@@ -1,13 +1,11 @@
 <script setup>
-import { onMounted, reactive, ref } from 'vue';
+import { inject, onMounted, reactive, ref } from 'vue';
 import {
   loadContainerDefaultsSetting,
   loadContainerLimitsSetting,
   loadContainers,
   loadManagedNetworks,
-  loadImageSourceSetting,
   saveContainerLimitsSetting,
-  saveImageSourceSetting,
   showMessage,
   store,
 } from '../../stores/appStore';
@@ -39,13 +37,12 @@ const form = reactive({
 const showBuildModal = ref(false);
 const buildPayload = ref(null);
 const showPreferencesModal = ref(false);
-const imageSourceInput = ref('');
 const maxContainersInput = ref('');
 const maxRenewTimesInput = ref('');
-const imageSourceLoading = ref(false);
-const imageSourceSaving = ref(false);
 const limitsLoading = ref(false);
 const limitsSaving = ref(false);
+const systemPreferencesOpening = ref(false);
+const openSystemPreferences = inject('openSystemPreferences', null);
 
 function applyContainerDefaults(defaults = store.settings.containerDefaults) {
   const source = defaults || {};
@@ -155,17 +152,6 @@ function onBuildClose() {
   buildPayload.value = null;
 }
 
-async function loadImageSource() {
-  imageSourceLoading.value = true;
-  try {
-    imageSourceInput.value = await loadImageSourceSetting();
-  } catch (error) {
-    showMessage(error.message || '加载镜像源设置失败', 'error');
-  } finally {
-    imageSourceLoading.value = false;
-  }
-}
-
 async function loadContainerLimits() {
   limitsLoading.value = true;
   try {
@@ -180,7 +166,6 @@ async function loadContainerLimits() {
 }
 
 async function savePreferences() {
-  imageSourceSaving.value = true;
   limitsSaving.value = true;
   try {
     const maxContainers = Number.parseInt(String(maxContainersInput.value || '').trim(), 10);
@@ -192,9 +177,7 @@ async function savePreferences() {
       throw new Error('最大续期次数需为非负整数');
     }
 
-    await saveImageSourceSetting(imageSourceInput.value);
     await saveContainerLimitsSetting(maxContainers, maxRenewTimes);
-    imageSourceInput.value = store.settings.imageSource;
     maxContainersInput.value = String(store.settings.containerLimits.maxContainers);
     maxRenewTimesInput.value = String(store.settings.containerLimits.maxRenewTimes);
     showMessage('创建偏好设置已更新', 'success');
@@ -202,18 +185,34 @@ async function savePreferences() {
   } catch (error) {
     showMessage(error.message || '保存创建偏好设置失败', 'error');
   } finally {
-    imageSourceSaving.value = false;
     limitsSaving.value = false;
   }
 }
 
 async function openPreferencesModal() {
   showPreferencesModal.value = true;
-  await Promise.allSettled([loadImageSource(), loadContainerLimits()]);
+  await loadContainerLimits();
 }
 
 function closePreferencesModal() {
   showPreferencesModal.value = false;
+}
+
+async function openImageSourceSettings() {
+  if (systemPreferencesOpening.value) return;
+  if (typeof openSystemPreferences !== 'function') {
+    showMessage('系统偏好入口不可用', 'error');
+    return;
+  }
+
+  systemPreferencesOpening.value = true;
+  try {
+    await openSystemPreferences();
+  } catch (error) {
+    showMessage(error.message || '打开系统偏好失败', 'error');
+  } finally {
+    systemPreferencesOpening.value = false;
+  }
 }
 
 function validateEnvFormat() {
@@ -250,9 +249,15 @@ onMounted(async () => {
           <button
             type="button"
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
+            :disabled="systemPreferencesOpening"
+            @click="openImageSourceSettings"
+          >镜像源设置</button>
+          <button
+            type="button"
+            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
             @click="openPreferencesModal"
           >
-            偏好设置
+            创建偏好
           </button>
           <button
             type="button"
@@ -529,11 +534,8 @@ onMounted(async () => {
 
     <CreatePreferencesModal
       :visible="showPreferencesModal"
-      :image-source-loading="imageSourceLoading"
-      :image-source-saving="imageSourceSaving"
       :limits-loading="limitsLoading"
       :limits-saving="limitsSaving"
-      v-model:image-source-input="imageSourceInput"
       v-model:max-containers-input="maxContainersInput"
       v-model:max-renew-times-input="maxRenewTimesInput"
       @close="closePreferencesModal"

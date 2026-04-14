@@ -200,17 +200,19 @@
 
   .tab-page-enter-active,
   .tab-page-leave-active {
-    transition: opacity 0.2s ease, transform 0.24s ease;
+    transition-property: opacity, transform;
+    transition-timing-function: cubic-bezier(.4, 0, .2, 1);
+    transition-duration: .15s;
   }
 
   .tab-page-enter-from {
     opacity: 0;
-    transform: translateY(6px);
+    transform: translateY(4px);
   }
 
   .tab-page-leave-to {
     opacity: 0;
-    transform: translateY(-6px);
+    transform: translateY(-4px);
   }
 }
 

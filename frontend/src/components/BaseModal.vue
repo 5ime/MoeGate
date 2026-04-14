@@ -8,11 +8,13 @@ const props = defineProps({
   showClose: { type: Boolean, default: true },
   icon: { type: String, default: '' },  // info | success | error | loading | bolt
   zIndex: { type: String, default: 'z-[9200]' },
+  closeOnBackdrop: { type: Boolean, default: false },
 });
 
 const emit = defineEmits(['close']);
 
 function onBackdrop() {
+  if (!props.closeOnBackdrop) return;
   emit('close');
 }
 </script>

@@ -18,6 +18,16 @@ export const store = reactive({
   message: '',
   messageType: 'success',
   containers: [],
+  images: {
+    items: [],
+    stats: {
+      total: 0,
+      dangling: 0,
+      inUse: 0,
+      unused: 0,
+      totalSizeText: '0 B',
+    },
+  },
   networks: {
     items: [],
     stats: {
@@ -150,6 +160,12 @@ export function logout() {
   clearApiKey();
   store.apiKey = '';
   store.containers = [];
+  store.images.items = [];
+  store.images.stats.total = 0;
+  store.images.stats.dangling = 0;
+  store.images.stats.inUse = 0;
+  store.images.stats.unused = 0;
+  store.images.stats.totalSizeText = '0 B';
   store.networks.items = [];
   store.networks.stats.total = 0;
   store.networks.stats.inUse = 0;
@@ -188,6 +204,47 @@ export async function loadContainers() {
   store.containers = list;
   store.stats.total = list.length;
   store.stats.running = list.filter((item) => String(item.status || '').toLowerCase() === 'running').length;
+}
+
+export async function loadImages() {
+  const result = await apiRequest('/images');
+  const data = result?.data || {};
+  const items = data.images || [];
+  store.images.items = items;
+  store.images.stats.total = Number(data.total ?? items.length) || 0;
+  store.images.stats.dangling = Number(data.dangling ?? items.filter((item) => !!item?.is_dangling).length) || 0;
+  store.images.stats.inUse = Number(data.in_use ?? items.filter((item) => Number(item?.containers_using || 0) > 0).length) || 0;
+  store.images.stats.unused = Number(data.unused ?? items.filter((item) => Number(item?.containers_using || 0) <= 0).length) || 0;
+  store.images.stats.totalSizeText = String(data.total_size_text || '0 B');
+  return items;
+}
+
+export async function loadImageDetail(imageRef) {
+  const result = await apiRequest(`/images/detail/${encodeURIComponent(imageRef)}`);
+  return result?.data || null;
+}
+
+export async function pullManagedImage(image) {
+  return apiRequest('/images/pull', {
+    method: 'POST',
+    body: { image },
+    timeoutMs: 300000,
+  });
+}
+
+export async function deleteManagedImage(imageRef, force = false) {
+  return apiRequest(`/images/${encodeURIComponent(imageRef)}${force ? '?force=1' : ''}`, {
+    method: 'DELETE',
+    timeoutMs: 120000,
+  });
+}
+
+export async function pruneManagedImages() {
+  return apiRequest('/images/prune', {
+    method: 'POST',
+    body: {},
+    timeoutMs: 180000,
+  });
 }
 
 export async function loadManagedNetworks() {
@@ -402,6 +459,10 @@ export async function loadMetrics() {
 
 export async function refreshContainersPanel() {
   await Promise.allSettled([loadContainers(), loadSystemStatus()]);
+}
+
+export async function refreshImagesPanel() {
+  await loadImages();
 }
 
 export async function refreshNetworksPanel() {

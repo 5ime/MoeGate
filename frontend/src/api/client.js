@@ -2,7 +2,13 @@ export const API_PREFIX = '/api/v1';
 
 export function getApiBase() {
   const stored = localStorage.getItem('apiBase');
-  return (stored && stored.trim()) || window.location.origin;
+  return (stored && stored.trim()) || getConfiguredDefaultApiBase() || window.location.origin;
+}
+ 
+function getConfiguredDefaultApiBase() {
+  const envBase = String(import.meta.env?.VITE_API_BASE || '').trim();
+  if (!envBase) return '';
+  return envBase.replace(/\/+$/, '');
 }
 
 export function setApiBase(base) {
