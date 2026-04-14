@@ -20,6 +20,7 @@ from infra.docker import (
     ensure_client,
 )
 from utils.container_manager import get_container_manager
+from utils.image_registry import register_managed_image
 from services.container.port_manager import get_container_ports, process_service_ports, get_port_info
 from services.container.info import get_container_info
 from utils.port_utils import release_port
@@ -38,6 +39,66 @@ def _extract_docker_error_message(exc: Exception) -> str:
 
     message = str(explanation or exc or "").strip()
     return message or "Docker 操作失败"
+
+
+def _split_image_reference(image_ref: str) -> Tuple[str, Optional[str]]:
+    """拆分镜像引用为 repository 与 tag/digest。"""
+    text = str(image_ref or "").strip()
+    if not text:
+        return "", None
+
+    if "@" in text:
+        repository, digest = text.rsplit("@", 1)
+        return repository, digest or None
+
+    last_slash = text.rfind("/")
+    last_colon = text.rfind(":")
+    if last_colon > last_slash:
+        return text[:last_colon], text[last_colon + 1:] or None
+
+    return text, None
+
+
+def _format_pull_progress_event(chunk: Dict[str, Any]) -> Optional[str]:
+    status = str(chunk.get("status") or "").strip()
+    identifier = str(chunk.get("id") or "").strip()
+    progress = str(chunk.get("progress") or "").strip()
+    if not status:
+        return None
+
+    parts = [status]
+    if identifier:
+        parts.append(identifier)
+    line = " | ".join(parts)
+    if progress:
+        line = f"{line} {progress}"
+    return line
+
+
+def _is_pull_not_found_message(message: str) -> bool:
+    text = str(message or "").strip().lower()
+    if not text:
+        return False
+    if "access denied" in text or "denied:" in text:
+        return False
+    return "manifest unknown" in text or "not found" in text or "failed to resolve reference" in text
+
+
+def _build_pull_not_found_hint(requested_image: str, resolved_image: str) -> str:
+    requested = str(requested_image or "").strip()
+    candidate = requested or str(resolved_image or "").strip()
+    image_name = candidate.split("/", 1)[-1].split("@", 1)[0].split(":", 1)[0].strip().lower()
+    if image_name == "apache":
+        return "Docker Hub 官方 Apache HTTP Server 镜像通常使用 httpd:latest。"
+    return f"请确认镜像名 {candidate or resolved_image} 是否正确，或当前镜像源是否提供该镜像。"
+
+
+def _raise_pull_image_error(message: str, requested_image: str, resolved_image: str):
+    normalized = str(message or "").strip() or "未知错误"
+    if _is_pull_not_found_message(normalized):
+        hint = _build_pull_not_found_hint(requested_image, resolved_image)
+        raise ImageBuildError(f"未找到可拉取镜像: {resolved_image}。{hint}")
+    raise ImageBuildError(f"拉取镜像失败: {normalized}")
 
 
 def _is_network_pool_exhausted_error(exc: Exception) -> bool:
@@ -221,6 +282,147 @@ def _build_explicit_port_bindings(port_mappings: Optional[List[Tuple[str, int]]]
     return bindings
 
 
+def ensure_image_available(
+    image: str,
+    app_config: AppConfig = None,
+    client=None,
+    progress_messages: Optional[List[str]] = None,
+):
+    """确保镜像在本地可用；缺失时自动拉取。"""
+    if app_config is None:
+        app_config = default_config
+
+    if client is None:
+        client = ensure_client()
+    if not client:
+        raise DockerConnectionError("Docker客户端不可用")
+
+    requested_image = str(image or "").strip()
+    image_source = getattr(app_config, "IMAGE_SOURCE", None)
+    resolved_image = _resolve_image_reference(image, image_source)
+
+    try:
+        image_obj = client.images.get(resolved_image)
+        register_managed_image(
+            image_obj.id,
+            source="managed-container",
+            requested_image=requested_image,
+            resolved_image=resolved_image,
+            tags=list(getattr(image_obj, "tags", None) or []),
+        )
+        return resolved_image, image_obj
+    except docker.errors.ImageNotFound:
+        logger.info("镜像 %s 不存在，开始自动拉取", resolved_image)
+        if progress_messages is not None:
+            progress_messages.append(f"镜像不存在，正在自动拉取: {resolved_image}")
+    except docker.errors.APIError as e:
+        raise ImageBuildError(f"获取镜像失败: {_extract_docker_error_message(e)}")
+
+    try:
+        image_obj = client.images.pull(resolved_image)
+        if isinstance(image_obj, list):
+            image_obj = image_obj[-1] if image_obj else client.images.get(resolved_image)
+        logger.info("镜像拉取成功: %s", resolved_image)
+        register_managed_image(
+            image_obj.id,
+            source="managed-container",
+            requested_image=requested_image,
+            resolved_image=resolved_image,
+            tags=list(getattr(image_obj, "tags", None) or []),
+        )
+        if progress_messages is not None:
+            progress_messages.append(f"镜像拉取完成: {resolved_image}")
+        return resolved_image, image_obj
+    except docker.errors.ImageNotFound:
+        _raise_pull_image_error("not found", requested_image, resolved_image)
+    except docker.errors.APIError as e:
+        _raise_pull_image_error(_extract_docker_error_message(e), requested_image, resolved_image)
+
+
+def ensure_image_available_streaming(
+    image: str,
+    app_config: AppConfig = None,
+    client=None,
+):
+    """流式确保镜像可用；逐行产生日志，结束时返回(resolved_image, image_obj)。"""
+    if app_config is None:
+        app_config = default_config
+
+    if client is None:
+        client = ensure_client()
+    if not client:
+        raise DockerConnectionError("Docker客户端不可用")
+
+    requested_image = str(image or "").strip()
+    image_source = getattr(app_config, "IMAGE_SOURCE", None)
+    resolved_image = _resolve_image_reference(image, image_source)
+
+    try:
+        image_obj = client.images.get(resolved_image)
+        register_managed_image(
+            image_obj.id,
+            source="managed-container",
+            requested_image=requested_image,
+            resolved_image=resolved_image,
+            tags=list(getattr(image_obj, "tags", None) or []),
+        )
+        yield f"镜像已存在，本地可用: {resolved_image}"
+        return resolved_image, image_obj
+    except docker.errors.ImageNotFound:
+        logger.info("镜像 %s 不存在，开始自动拉取", resolved_image)
+        yield f"镜像不存在，正在自动拉取: {resolved_image}"
+    except docker.errors.APIError as e:
+        raise ImageBuildError(f"获取镜像失败: {_extract_docker_error_message(e)}")
+
+    api_pull = getattr(getattr(client, "api", None), "pull", None)
+    if not callable(api_pull):
+        progress_messages: List[str] = []
+        resolved_image, image_obj = ensure_image_available(
+            image,
+            app_config=app_config,
+            client=client,
+            progress_messages=progress_messages,
+        )
+        for line in progress_messages:
+            if line != f"镜像不存在，正在自动拉取: {resolved_image}":
+                yield line
+        return resolved_image, image_obj
+
+    repository, tag = _split_image_reference(resolved_image)
+    try:
+        for chunk in api_pull(repository=repository, tag=tag, stream=True, decode=True):
+            if not isinstance(chunk, dict):
+                continue
+
+            if chunk.get("error"):
+                _raise_pull_image_error(str(chunk.get("error") or "").strip(), requested_image, resolved_image)
+
+            line = _format_pull_progress_event(chunk)
+            if line:
+                yield line
+
+        try:
+            image_obj = client.images.get(resolved_image)
+        except docker.errors.ImageNotFound:
+            image_obj = client.images.pull(resolved_image)
+            if isinstance(image_obj, list):
+                image_obj = image_obj[-1] if image_obj else client.images.get(resolved_image)
+
+        register_managed_image(
+            image_obj.id,
+            source="managed-container",
+            requested_image=requested_image,
+            resolved_image=resolved_image,
+            tags=list(getattr(image_obj, "tags", None) or []),
+        )
+        yield f"镜像拉取完成: {resolved_image}"
+        return resolved_image, image_obj
+    except docker.errors.ImageNotFound:
+        _raise_pull_image_error("not found", requested_image, resolved_image)
+    except docker.errors.APIError as e:
+        _raise_pull_image_error(_extract_docker_error_message(e), requested_image, resolved_image)
+
+
 @contextmanager
 def disable_docker_credentials(client):
     """临时禁用 docker 凭证存储，避免构建阶段触发外部凭证助手"""
@@ -289,6 +491,13 @@ def build_or_get_image(path: str, tag: Optional[str]):
         try:
             image = client.images.get(tag)
             logger.info("使用已存在的镜像: %s", tag)
+            register_managed_image(
+                image.id,
+                source="build",
+                requested_image=tag,
+                resolved_image=tag,
+                tags=list(getattr(image, "tags", None) or []),
+            )
             return image
         except docker.errors.ImageNotFound:
             logger.info("镜像 %s 不存在，开始构建", tag)
@@ -322,6 +531,13 @@ def build_or_get_image(path: str, tag: Optional[str]):
             raise ImageBuildError(error_msg)
 
         logger.info("镜像构建成功: %s", final_tag)
+        register_managed_image(
+            image.id,
+            source="build",
+            requested_image=final_tag,
+            resolved_image=final_tag,
+            tags=list(getattr(image, "tags", None) or []),
+        )
         return image
 
 
@@ -841,6 +1057,11 @@ def create_container_from_service(service: Dict, app_config: AppConfig = None, r
     client = ensure_client()
     if not client:
         raise DockerConnectionError("Docker客户端不可用")
+
+    image_id = service.get("_resolved_image_id")
+    if not image_id:
+        _resolved_image, image_obj = ensure_image_available(service["image"], app_config=app_config, client=client)
+        image_id = image_obj.id
     
     container_name = service["container_name"]
     cleanup_existing_container(client, container_name)
@@ -865,7 +1086,7 @@ def create_container_from_service(service: Dict, app_config: AppConfig = None, r
 
     # 构建容器创建参数（使用公共函数）
     create_kwargs = build_container_create_kwargs(
-        image=service["image"],
+        image=image_id,
         name=container_name,
         ports=port_bindings,
         command=service.get("command"),
@@ -1120,6 +1341,22 @@ def _start_from_compose_streaming(compose_path: str, uid, max_time: int, env: Di
                         continue
                     yield f"[{name}] {line}"
 
+            image_preview = _resolve_image_reference(service["image"], getattr(app_config, "IMAGE_SOURCE", None))
+            yield f"[{name}] 正在检查镜像: {image_preview}"
+            image_stream = ensure_image_available_streaming(
+                service["image"],
+                app_config=app_config,
+                client=client,
+            )
+            while True:
+                try:
+                    line = next(image_stream)
+                    yield f"[{name}] {line}"
+                except StopIteration as stop:
+                    _resolved_image, image_obj = stop.value
+                    break
+            service["_resolved_image_id"] = image_obj.id
+
             yield f"[{name}] 正在创建容器..."
             container = create_container_from_service(service, app_config, resource_limits=resource_limits)
             containers_to_start.append((container, name))
@@ -1184,14 +1421,7 @@ def start_from_image(
         raise DockerConnectionError("Docker客户端不可用")
 
     image_source = getattr(app_config, "IMAGE_SOURCE", None)
-    resolved_image = _resolve_image_reference(image, image_source)
-
-    try:
-        image_obj = client.images.get(resolved_image)
-    except docker.errors.ImageNotFound:
-        raise ImageBuildError(f"镜像不存在: {resolved_image}")
-    except docker.errors.APIError as e:
-        raise ImageBuildError(f"获取镜像失败: {e}")
+    resolved_image, image_obj = ensure_image_available(image, app_config=app_config, client=client)
 
     if port_mappings:
         ports = _build_explicit_port_bindings(port_mappings)
@@ -1287,14 +1517,19 @@ def start_from_image_streaming(
 
     image_source = getattr(app_config, "IMAGE_SOURCE", None)
     resolved_image = _resolve_image_reference(image, image_source)
-
     yield f"正在检查镜像: {resolved_image}"
-    try:
-        image_obj = client.images.get(resolved_image)
-    except docker.errors.ImageNotFound:
-        raise ImageBuildError(f"镜像不存在: {resolved_image}")
-    except docker.errors.APIError as e:
-        raise ImageBuildError(f"获取镜像失败: {e}")
+    image_stream = ensure_image_available_streaming(
+        image,
+        app_config=app_config,
+        client=client,
+    )
+    while True:
+        try:
+            line = next(image_stream)
+            yield line
+        except StopIteration as stop:
+            resolved_image, image_obj = stop.value
+            break
 
     if port_mappings:
         yield "镜像就绪，正在应用固定端口映射..."
