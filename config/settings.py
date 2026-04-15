@@ -1,4 +1,5 @@
 """应用配置"""
+import ipaddress
 import os
 import logging
 from dataclasses import dataclass, field
@@ -86,6 +87,8 @@ class AppConfig:
     IMAGE_SOURCE: Optional[str] = os.getenv("IMAGE_SOURCE")
     WEBUI_API_BASE: Optional[str] = os.getenv("WEBUI_API_BASE")
     WEBUI_POLL_INTERVAL_SEC: int = _get_int_env("WEBUI_POLL_INTERVAL_SEC", 30)
+    COMPOSE_MANAGED_SUBNET_POOL: str = os.getenv("COMPOSE_MANAGED_SUBNET_POOL", "172.30.0.0/16")
+    COMPOSE_MANAGED_SUBNET_PREFIX: int = _get_int_env("COMPOSE_MANAGED_SUBNET_PREFIX", 24)
 
     # FRP
     ENABLE_FRP: bool = _get_bool_env("ENABLE_FRP", False)
@@ -170,6 +173,19 @@ class AppConfig:
 
         if self.WEBUI_POLL_INTERVAL_SEC <= 0:
             raise ValueError("WEBUI_POLL_INTERVAL_SEC 必须大于 0")
+
+        try:
+            compose_pool = ipaddress.ip_network(self.COMPOSE_MANAGED_SUBNET_POOL, strict=False)
+        except ValueError:
+            raise ValueError("COMPOSE_MANAGED_SUBNET_POOL 必须是合法的 IPv4 CIDR 网段")
+        if compose_pool.version != 4:
+            raise ValueError("COMPOSE_MANAGED_SUBNET_POOL 目前仅支持 IPv4 网段")
+        self.COMPOSE_MANAGED_SUBNET_POOL = str(compose_pool)
+
+        if self.COMPOSE_MANAGED_SUBNET_PREFIX < compose_pool.prefixlen:
+            raise ValueError("COMPOSE_MANAGED_SUBNET_PREFIX 不能小于 COMPOSE_MANAGED_SUBNET_POOL 的前缀长度")
+        if self.COMPOSE_MANAGED_SUBNET_PREFIX > 30:
+            raise ValueError("COMPOSE_MANAGED_SUBNET_PREFIX 不能大于 30")
 
         port_range = self.MAX_PORT - self.MIN_PORT
         if port_range < self.MAX_CONTAINERS:

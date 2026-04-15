@@ -1,4 +1,5 @@
 """系统状态路由"""
+import ipaddress
 import logging
 import platform
 import time
@@ -74,6 +75,23 @@ def _persist_webui_settings(api_base: str, poll_interval_sec: int, max_container
         return True, ""
     except Exception as exc:
         logger.warning("持久化 WEBUI 设置失败: %s", exc)
+        return False, f"持久化失败: {exc}"
+
+
+def _persist_networking_settings(compose_managed_subnet_pool: str, compose_managed_subnet_prefix: int):
+    """持久化 Compose 受管网络设置到 .env。"""
+    if not getattr(config, "ALLOW_RUNTIME_CONFIG_WRITE", False):
+        return False, "已禁用运行时配置写入（ALLOW_RUNTIME_CONFIG_WRITE=False）"
+    try:
+        env_path = find_dotenv(filename=".env", usecwd=True)
+        if not env_path:
+            return False, "未找到 .env，当前仅进程内生效"
+
+        set_key(env_path, "COMPOSE_MANAGED_SUBNET_POOL", compose_managed_subnet_pool, quote_mode="never")
+        set_key(env_path, "COMPOSE_MANAGED_SUBNET_PREFIX", str(compose_managed_subnet_prefix), quote_mode="never")
+        return True, ""
+    except Exception as exc:
+        logger.warning("持久化网络设置失败: %s", exc)
         return False, f"持久化失败: {exc}"
 
 
@@ -374,6 +392,18 @@ def get_container_defaults_setting():
     return success(data, "获取容器默认配置成功")
 
 
+@bp.route("/settings/networking", methods=["GET"])
+@require_api_key
+@rate_limit(max_per_min=30)
+def get_networking_settings():
+    """获取 Compose 受管网络默认设置。"""
+    data = {
+        "compose_managed_subnet_pool": str(getattr(config, "COMPOSE_MANAGED_SUBNET_POOL", "172.30.0.0/16") or "172.30.0.0/16"),
+        "compose_managed_subnet_prefix": int(getattr(config, "COMPOSE_MANAGED_SUBNET_PREFIX", 24) or 24),
+    }
+    return success(data, "获取网络设置成功")
+
+
 @bp.route("/settings/webui", methods=["PUT"])
 @require_api_key
 @validate_json(required=["api_base", "poll_interval_sec"])
@@ -428,6 +458,57 @@ def update_webui_settings():
         data["persist_message"] = persist_msg
 
     msg = "WebUI 设置更新成功" if persisted else "WebUI 设置更新成功（仅当前进程生效）"
+    return success(data, msg)
+
+
+@bp.route("/settings/networking", methods=["PUT"])
+@require_api_key
+@validate_json(required=["compose_managed_subnet_pool", "compose_managed_subnet_prefix"])
+@rate_limit(max_per_min=20)
+def update_networking_settings():
+    """更新 Compose 受管网络默认设置，并尝试持久化到 .env。"""
+    subnet_pool_raw = g.json.get("compose_managed_subnet_pool")
+    subnet_prefix_raw = g.json.get("compose_managed_subnet_prefix")
+
+    if not isinstance(subnet_pool_raw, str):
+        return error("字段 compose_managed_subnet_pool 必须为字符串", 400)
+
+    subnet_pool_text = subnet_pool_raw.strip()
+    if not subnet_pool_text:
+        return error("字段 compose_managed_subnet_pool 不能为空", 400)
+
+    try:
+        subnet_pool = ipaddress.ip_network(subnet_pool_text, strict=False)
+    except ValueError:
+        return error("字段 compose_managed_subnet_pool 必须是合法的 IPv4 CIDR 网段", 400)
+
+    if subnet_pool.version != 4:
+        return error("字段 compose_managed_subnet_pool 目前仅支持 IPv4 网段", 400)
+
+    try:
+        subnet_prefix = int(subnet_prefix_raw)
+    except (TypeError, ValueError):
+        return error("字段 compose_managed_subnet_prefix 必须为整数", 400)
+
+    if subnet_prefix < subnet_pool.prefixlen:
+        return error("字段 compose_managed_subnet_prefix 不能小于地址池前缀长度", 400)
+    if subnet_prefix > 30:
+        return error("字段 compose_managed_subnet_prefix 不能大于 30", 400)
+
+    normalized_pool = str(subnet_pool)
+    config.COMPOSE_MANAGED_SUBNET_POOL = normalized_pool
+    config.COMPOSE_MANAGED_SUBNET_PREFIX = subnet_prefix
+
+    persisted, persist_msg = _persist_networking_settings(normalized_pool, subnet_prefix)
+    data = {
+        "compose_managed_subnet_pool": normalized_pool,
+        "compose_managed_subnet_prefix": subnet_prefix,
+        "persisted": persisted,
+    }
+    if persist_msg:
+        data["persist_message"] = persist_msg
+
+    msg = "网络设置更新成功" if persisted else "网络设置更新成功（仅当前进程生效）"
     return success(data, msg)
 
 

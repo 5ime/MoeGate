@@ -1,4 +1,6 @@
 """容器构建和创建"""
+import hashlib
+import ipaddress
 import os
 import yaml
 import docker
@@ -9,6 +11,7 @@ from contextlib import contextmanager
 import uuid
 from typing import Dict, Any, Optional, List, Tuple
 from datetime import datetime
+from docker.types import IPAMConfig, IPAMPool
 from config.settings import config as default_config, AppConfig
 from core.exceptions import (
     DockerConnectionError,
@@ -26,6 +29,9 @@ from services.container.info import get_container_info
 from utils.port_utils import release_port
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_COMPOSE_MANAGED_SUBNET_POOL = "172.30.0.0/16"
+DEFAULT_COMPOSE_MANAGED_SUBNET_PREFIX = 24
 
 
 def _extract_docker_error_message(exc: Exception) -> str:
@@ -110,6 +116,149 @@ def _is_network_pool_exhausted_error(exc: Exception) -> bool:
     )
 
 
+def _network_attrs(network) -> Dict[str, Any]:
+    attrs = getattr(network, "attrs", None) or {}
+    if not attrs and hasattr(network, "reload"):
+        try:
+            network.reload()
+        except Exception:
+            logger.debug("刷新网络 attrs 失败: %s", getattr(network, "name", getattr(network, "id", "unknown")), exc_info=True)
+        attrs = getattr(network, "attrs", None) or attrs
+    return attrs
+
+
+def _get_compose_managed_subnet_config(app_config: AppConfig = None) -> Tuple[ipaddress.IPv4Network, int]:
+    effective_config = app_config or default_config
+    pool_raw = getattr(effective_config, "COMPOSE_MANAGED_SUBNET_POOL", DEFAULT_COMPOSE_MANAGED_SUBNET_POOL)
+    prefix_raw = getattr(effective_config, "COMPOSE_MANAGED_SUBNET_PREFIX", DEFAULT_COMPOSE_MANAGED_SUBNET_PREFIX)
+
+    pool = ipaddress.ip_network(str(pool_raw), strict=False)
+    if pool.version != 4:
+        raise NetworkProvisionError("Compose 受管网络地址池目前仅支持 IPv4")
+
+    try:
+        prefix = int(prefix_raw)
+    except (TypeError, ValueError) as exc:
+        raise NetworkProvisionError("Compose 受管网络子网前缀配置非法") from exc
+
+    if prefix < pool.prefixlen or prefix > 30:
+        raise NetworkProvisionError("Compose 受管网络子网前缀超出允许范围")
+
+    return pool, prefix
+
+
+def _build_ipam_config(subnet: Optional[str], gateway: Optional[str] = None):
+    if not subnet and not gateway:
+        return None
+    pool = IPAMPool(subnet=subnet, gateway=gateway)
+    return IPAMConfig(pool_configs=[pool])
+
+
+def _normalize_ipam_subnet(value: Any) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return str(ipaddress.ip_network(text, strict=False))
+    except ValueError as exc:
+        raise NetworkProvisionError(f"Compose 网络 subnet 非法: {text}") from exc
+
+
+def _normalize_ipam_gateway(value: Any, subnet: Optional[str]) -> Optional[str]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        gateway = ipaddress.ip_address(text)
+    except ValueError as exc:
+        raise NetworkProvisionError(f"Compose 网络 gateway 非法: {text}") from exc
+
+    if subnet:
+        network = ipaddress.ip_network(subnet, strict=False)
+        if gateway.version != network.version:
+            raise NetworkProvisionError("Compose 网络 gateway 与 subnet 的 IP 版本不一致")
+        if gateway not in network:
+            raise NetworkProvisionError(f"Compose 网络 gateway 必须位于子网 {network} 内")
+
+    return str(gateway)
+
+
+def _extract_compose_network_ipam(cfg: Dict[str, Any]):
+    raw_ipam = cfg.get("ipam")
+    if not isinstance(raw_ipam, dict):
+        return None
+
+    configs = raw_ipam.get("config") or []
+    if not isinstance(configs, list):
+        return None
+
+    for item in configs:
+        if not isinstance(item, dict):
+            continue
+        subnet = _normalize_ipam_subnet(item.get("subnet"))
+        gateway = _normalize_ipam_gateway(item.get("gateway"), subnet)
+        ipam = _build_ipam_config(subnet, gateway)
+        if ipam is not None:
+            return ipam
+
+    return None
+
+
+def _extract_network_subnets(network) -> List[ipaddress._BaseNetwork]:
+    attrs = _network_attrs(network)
+    configs = ((attrs.get("IPAM") or {}).get("Config") or [])
+    subnets: List[ipaddress._BaseNetwork] = []
+    for item in configs:
+        if not isinstance(item, dict):
+            continue
+        subnet = str(item.get("Subnet") or "").strip()
+        if not subnet:
+            continue
+        try:
+            subnets.append(ipaddress.ip_network(subnet, strict=False))
+        except ValueError:
+            logger.debug("忽略非法网络子网配置: %s", subnet)
+    return subnets
+
+
+def _find_available_compose_subnet(client, compose_project_id: str, network_key: str, app_config: AppConfig = None) -> ipaddress.IPv4Network:
+    managed_pool, managed_prefix = _get_compose_managed_subnet_config(app_config)
+    candidates = tuple(managed_pool.subnets(new_prefix=managed_prefix))
+    if not candidates:
+        raise NetworkProvisionError("未配置可用的 Compose 网络地址池")
+
+    occupied: List[ipaddress._BaseNetwork] = []
+    for network in client.networks.list():
+        occupied.extend(_extract_network_subnets(network))
+
+    seed = f"{compose_project_id}:{network_key}".encode("utf-8", errors="ignore")
+    start_index = int.from_bytes(hashlib.sha256(seed).digest()[:8], "big") % len(candidates)
+
+    for offset in range(len(candidates)):
+        candidate = candidates[(start_index + offset) % len(candidates)]
+        if any(candidate.overlaps(existing) for existing in occupied):
+            continue
+        return candidate
+
+    raise NetworkProvisionError(
+        f"MoeGate Compose 受管网络地址池 {managed_pool} 已耗尽，请删除未使用的 Compose 项目后重试。"
+    )
+
+
+def _build_managed_compose_network_ipam(client, compose_project_id: str, network_key: str, cfg: Dict[str, Any], app_config: AppConfig = None):
+    explicit_ipam = _extract_compose_network_ipam(cfg)
+    if explicit_ipam is not None:
+        return explicit_ipam
+
+    driver = str(cfg.get("driver") or "bridge").strip().lower()
+    if driver and driver != "bridge":
+        return None
+
+    subnet = _find_available_compose_subnet(client, compose_project_id, network_key, app_config=app_config)
+    gateway = str(next(subnet.hosts(), subnet.network_address))
+    return _build_ipam_config(str(subnet), gateway)
+
+
 def _prune_unused_managed_networks(client, exclude_names: Optional[List[str]] = None) -> List[str]:
     """清理未被容器占用的 MoeGate 受管网络。"""
     if client is None:
@@ -151,7 +300,7 @@ def _prune_unused_managed_networks(client, exclude_names: Optional[List[str]] = 
     return removed_networks
 
 
-def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], compose_project_id: str):
+def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], compose_project_id: str, network_key: str, app_config: AppConfig = None):
     """创建 Compose 网络，地址池耗尽时尝试清理闲置受管网络后重试一次。"""
     create_kwargs = {
         "driver": str(cfg.get("driver") or "bridge"),
@@ -161,6 +310,9 @@ def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], com
             "moegate.compose_project_id": compose_project_id,
         },
     }
+    ipam = _build_managed_compose_network_ipam(client, compose_project_id, network_key, cfg, app_config=app_config)
+    if ipam is not None:
+        create_kwargs["ipam"] = ipam
 
     try:
         client.networks.create(resolved_name, **create_kwargs)
@@ -954,6 +1106,7 @@ def start_from_compose(
             client=client,
             compose_content=content,
             compose_project_id=compose_project_id,
+            app_config=app_config,
         )
 
         for name, service in content.get("services", {}).items():
@@ -1139,7 +1292,7 @@ def _extract_service_network_keys(service: Dict[str, Any]) -> List[str]:
     return []
 
 
-def _ensure_compose_networks(client, compose_content: Dict[str, Any], compose_project_id: str) -> Tuple[Dict[str, str], List[str]]:
+def _ensure_compose_networks(client, compose_content: Dict[str, Any], compose_project_id: str, app_config: AppConfig = None) -> Tuple[Dict[str, str], List[str]]:
     """确保 compose 中定义的网络存在，并返回逻辑名到实际 Docker 网络名的映射。"""
     if client is None:
         raise DockerConnectionError("Docker客户端不可用")
@@ -1169,7 +1322,7 @@ def _ensure_compose_networks(client, compose_content: Dict[str, Any], compose_pr
         if existing:
             continue
 
-        _create_compose_network(client, resolved_name, cfg, compose_project_id)
+        _create_compose_network(client, resolved_name, cfg, compose_project_id, str(network_key), app_config=app_config)
         created_networks.append(resolved_name)
 
     return mapping, created_networks
@@ -1294,7 +1447,7 @@ def _start_from_compose_streaming(compose_path: str, uid, max_time: int, env: Di
         compose_project_id = str(uid)
         client = ensure_client()
         compose_network_map, created_networks = _ensure_compose_networks(
-            client=client, compose_content=content, compose_project_id=compose_project_id,
+            client=client, compose_content=content, compose_project_id=compose_project_id, app_config=app_config,
         )
 
         for name, service in content.get("services", {}).items():
