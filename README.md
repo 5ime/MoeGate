@@ -1,140 +1,110 @@
-# MoeGate - 轻量级 Docker 容器管理网关
+# MoeGate
 
-MoeGate 支持通过 **Dockerfile / Docker Compose / 镜像名称** 一键创建容器，自带**到期自动销毁**、续期、资源限制、**受管网络**、FRP 内网穿透等能力。适用于 CTF / 靶场、临时演示环境、在线实验室等场景。
+轻量级 Docker 容器管理网关。支持 Dockerfile / Docker Compose / 镜像名称创建容器，到期自动销毁，内置 FRP 穿透。适用于 CTF 靶场、临时演示、在线实验室。
 
 ![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![Flask](https://img.shields.io/badge/Flask-2.x-black) ![Docker](https://img.shields.io/badge/Docker-Engine-2496ED)
 
 ![示例截图](https://github.com/user-attachments/assets/b8f64b98-7ca0-4417-aef6-3bf50b1b7f66)
 
-## 功能特性
-- **多模式创建**：支持 Dockerfile 构建、Docker Compose 编排、直接拉取镜像
-- **生命周期管理**：容器创建、重启、续期、异步销毁，到期自动清理
-- **资源精细化控制**：独立配置内存、CPU 核数、CPU Shares 限制
-- **线程安全端口管理**：自动分配或指定端口映射，避免冲突
-- **SSE 流式构建日志**：前端实时展示 `docker build` 过程
-- **受管网络管理**：支持子网/网关校验、IPAM 配置，占用网络禁止改删，更新采用离线重建策略
-- **受管镜像管理**：自动登记构建/拉取的镜像，支持详情查看、手动拉取、悬空清理、按引用关系删除
-- **多渠道告警**：支持 Webhook、飞书机器人卡片消息通知
-- **安全防护**：API Key 认证、IP 限流、路径/CORS 白名单、请求体大小校验
-- **受控隔离**：仅管理 MoeGate 创建的容器，不影响宿主机原有容器
-- **WebUI**：基于 Vue3+Vite 开发，支持网络管理、搜索筛选、详情弹窗等交互
-- **FRP 穿透**：容器创建后自动注册 frpc 代理，支持 TCP/HTTP 域名映射
+## 特性
+
+- 多模式创建：Dockerfile 构建 / Docker Compose 编排 / 镜像名称拉取
+- 生命周期管理：自动到期销毁、续期、重启，异步删除
+- 资源限制：内存、CPU 核数、CPU Shares
+- 端口管理：线程安全的自动分配，范围可配
+- SSE 流式日志：构建和拉取镜像过程实时输出
+- 受管网络：子网/网关校验，Compose 项目自动分配子网
+- 受管镜像：自动登记、悬空清理、引用关系约束
+- FRP 穿透：容器创建后自动注册 frpc 代理，支持 TCP/HTTP
+- 告警通知：Webhook / 飞书机器人卡片消息
+- 安全：API Key 认证、IP 限流、路径白名单、CORS、请求体校验
+- 隔离：只管理 MoeGate 创建的容器（`moegate.managed=true`），不影响宿主机
+- WebUI：Vue 3 + Tailwind CSS，容器/镜像/网络/FRP/系统设置一站式管理
 
 ## 环境要求
+
 | 依赖 | 版本 | 说明 |
 |------|------|------|
-| Python | 3.8+ | - |
-| Docker Engine | 20.10+ | 需可访问 Docker Daemon（常见为 Linux 的 `/var/run/docker.sock`） |
-| Node.js | 18+ | 仅在自行构建 WebUI 或前端开发时需要 |
+| Python | 3.8+ | |
+| Docker Engine | 20.10+ | 需可访问 Docker Daemon |
+| Node.js | 18+ | 仅构建 WebUI 时需要 |
 
 ## 快速开始
-### Linux / macOS
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp env.example .env
+cp env.example .env   # 编辑 .env
 python app.py
 ```
 
-### Windows (PowerShell)
+启动后访问 `http://localhost:8080`。
 
-```powershell
-python -m venv .venv; .\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-Copy-Item env.example .env
-python app.py
-```
+## 配置
 
-## 开发模式（前后端分离）
-默认情况下，后端会托管 `static/`（即前端 `vite build` 的产物）。如果你希望使用 Vite 的热更新开发 WebUI，推荐按下面方式启动：
+完整配置见 `env.example`，以下为必填项和常用项：
 
-### 1) 启动后端 API（禁用内置 WebUI）
-在 `.env` 中设置：
+| 变量 | 必填 | 说明 |
+|------|------|------|
+| `API_KEY` | **是** | API 密钥，不可用默认占位值 |
+| `ALLOWED_BASE_DIR` | **是** | Dockerfile/Compose 构建路径白名单根目录 |
+| `ENABLE_WEBUI` | | 是否托管 WebUI（默认 `True`） |
+| `IMAGE_SOURCE` | | 全局镜像前缀，拉取镜像时自动拼接 |
+| `MAX_CONTAINERS` | | 最大同时运行容器数（默认 `30`） |
+| `MAX_TIME` | | 容器最大运行时长，秒（默认 `3600`） |
+| `MIN_PORT` / `MAX_PORT` | | 端口映射范围（默认 `20000`-`30000`） |
+| `CONTAINER_MEMORY_LIMIT` | | 内存限制（默认 `512m`） |
+| `CONTAINER_CPU_LIMIT` | | CPU 核数限制 |
+| `ENABLE_FRP` | | 启用 FRP 穿透（需配置 `FRP_*` 变量） |
+| `ALLOW_RUNTIME_CONFIG_WRITE` | | 允许通过 API 持久化设置到 `.env`（默认 `False`） |
+| `COMPOSE_MANAGED_SUBNET_POOL` | | Compose 子网地址池（默认 `172.30.0.0/16`） |
 
-- `ENABLE_WEBUI=False`
-- （可选）`API_DEBUG=True`（仅本地开发）
+## 前端开发
 
-然后启动：
+默认后端托管 `static/` 下的构建产物。如需热更新开发：
 
 ```bash
+# 1. 后端：.env 中设置 ENABLE_WEBUI=False，然后
 python app.py
+
+# 2. 前端
+cd frontend && npm install && npm run dev
 ```
 
-### 2) 启动前端 Dev Server
-在 `frontend/` 下执行：
+Vite 已配置代理，开发模式下 `/api` 请求会自动转发到后端。
+
+构建产物：
 
 ```bash
-npm install
-npm run dev
+cd frontend && npm run build
+# 输出到 static/，Flask 自动托管
 ```
-
-前端默认监听 `127.0.0.1:5173`。如需让前端请求指向后端 API，可在 `.env` 中设置：
-
-- `WEBUI_API_BASE=http://127.0.0.1:8080`
-
-> 注意：生产模式下若启用浏览器跨域访问，请配置 `CORS_ALLOWED_ORIGINS` 白名单。
-
-## 配置要点（必填/常用）
-完整配置项见 `env.example`，这里只列出“必填且经常踩坑”的项。
-
-| 环境变量 | 是否必填 | 说明 |
-|----------|----------|------|
-| `API_KEY` | **必填** | API 访问密钥（不可使用默认占位值） |
-| `ALLOWED_BASE_DIR` | **必填** | 允许构建的目录白名单根路径（用于限制 Dockerfile/Compose 的读取路径） |
-| `ENABLE_WEBUI` | 否 | 是否托管 WebUI 静态页面 |
-| `IMAGE_SOURCE` | 否 | 全局镜像前缀，手动拉取镜像和按镜像名创建容器时会自动拼接 |
-| `WEBUI_POLL_INTERVAL_SEC` | 否 | WebUI 自动轮询刷新间隔 |
-| `ALLOW_RUNTIME_CONFIG_WRITE` | 否 | 是否允许通过设置接口把变更持久化回 `.env` |
-| `SSE_MAX_LOG_LINE_LENGTH` | 否 | SSE 单行日志长度上限，防止前端日志流过大 |
-| `SSE_MAX_LOG_EVENTS` | 否 | SSE 最大事件条数，超过会提前终止流式输出 |
-| `DISABLE_DOCKER_CREDENTIALS` | 否 | 某些环境下可规避 Docker 凭证助手导致的拉取异常 |
-| `ENABLE_FRP` | 否 | 是否启用 FRP 代理管理（启用后需要配置 `FRP_*`） |
-
-## 受管镜像说明
-- **纳管范围**：通过 MoeGate 手动拉取的镜像、按镜像名创建容器时自动拉取的镜像、以及 Dockerfile/Compose 过程中产出的镜像，都会登记为“受管镜像”
-- **登记文件**：镜像登记信息保存在 `runtime/managed-images.json`，记录来源、请求镜像名、解析后镜像名、标签与更新时间
-- **列表口径**：镜像列表只返回 MoeGate 已登记或仍被受管容器引用的镜像，不会把宿主机所有镜像都暴露给前端
-- **删除约束**：镜像仍被受管容器引用时不能直接删除；若一个镜像同时挂了多个 tag，删除时可能需要 `force=true`
-- **清理范围**：`/api/v1/images/prune` 只清理“受管且未被 tag 引用”的悬空镜像，不会扫描全宿主机镜像仓库
 
 ## 项目结构
 
-```text
-├── app.py                  # Flask 应用入口
-├── config/                 # 配置加载与校验
-├── core/                   # 事件总线、异常、日志、响应格式、关闭钩子
-├── infra/                  # Docker 客户端管理
-├── middleware/             # 认证、限流、请求校验、日志
-├── routes/                 # API 路由（容器、网络、FRP、系统/设置）
-├── services/
-│   ├── container/          # 容器构建、生命周期、端口管理、信息查询
-│   ├── frp/                # FRP 代理管理、配置解析、事件处理
-│   └── network.py          # 受管网络服务
-├── utils/                  # 销毁任务、端口工具、路径校验、告警
-├── workers/                # 性能监控
-├── frontend/               # Vue 3 WebUI 源码
-└── static/                 # WebUI 构建产物（Flask 托管）
+```
+app.py                  # Flask 入口
+config/                 # 配置加载与校验
+core/                   # 事件总线、异常、日志、响应、关闭钩子
+infra/                  # Docker 客户端（单例、自动重连）
+middleware/             # 认证、限流、请求校验、日志
+routes/                 # API 路由
+services/
+  container/            # 构建、生命周期、端口管理、信息查询
+  frp/                  # FRP 代理管理、配置解析
+  image.py              # 受管镜像服务
+  network.py            # 受管网络服务
+utils/                  # 销毁任务、端口工具、路径校验、告警、镜像登记
+workers/                # 性能监控
+frontend/               # Vue 3 WebUI 源码
+static/                 # WebUI 构建产物
 ```
 
-## WebUI
-- **开关**：`ENABLE_WEBUI=True`（默认开启）
-- **构建前端产物**：
+## API
 
-```bash
-cd frontend
-npm install
-npm run build
-```
-
-产物将输出到 `static/`，由 Flask 自动托管。
-
-## API 概览
-所有接口均需在请求头中携带 `X-API-Key`。
+所有接口需要 `X-API-Key` 请求头。
 
 ### 容器
 
-#### 单容器
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/api/v1/containers` | 创建容器 |
@@ -142,42 +112,53 @@ npm run build
 | `GET` | `/api/v1/containers` | 容器列表 |
 | `GET` | `/api/v1/containers/<id>` | 容器详情 |
 | `PATCH` | `/api/v1/containers/<id>` | 重启容器 |
-| `DELETE` | `/api/v1/containers/<id>` | 异步删除容器 |
+| `DELETE` | `/api/v1/containers/<id>` | 删除容器（异步） |
 | `GET` | `/api/v1/containers/<id>/destroy-status` | 删除任务状态 |
-| `POST` | `/api/v1/containers/<id>/renew` | 续期容器 |
+| `POST` | `/api/v1/containers/<id>/renew` | 续期 |
 
-> 说明：容器列表/详情等查询与操作仅针对 **受管容器**（`moegate.managed=true`）；当没有受管容器时列表为空，不会展示宿主机其它容器。
-
-#### 统一实体入口
-适用于“调用方不确定传入的是单容器 ID 还是 Compose 项目 ID”的场景，后端会自动识别并路由到对应操作。
+**统一入口**（自动识别单容器或 Compose 项目）：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `PATCH` | `/api/v1/containers/restart/<id>` | 自动识别并重启（容器/项目） |
-| `DELETE` | `/api/v1/containers/destroy/<id>` | 自动识别并异步删除（容器/项目） |
-| `POST` | `/api/v1/containers/renew/<id>` | 自动识别并续期（容器/项目） |
+| `PATCH` | `/api/v1/containers/restart/<id>` | 重启 |
+| `DELETE` | `/api/v1/containers/destroy/<id>` | 删除 |
+| `POST` | `/api/v1/containers/renew/<id>` | 续期 |
 
-#### Compose 项目
+**Compose 项目**：
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/containers/project/<id>` | 项目详情 |
 | `PATCH` | `/api/v1/containers/project/<id>` | 重启项目 |
-| `DELETE` | `/api/v1/containers/project/<id>` | 异步删除项目 |
-| `GET` | `/api/v1/containers/project/<id>/destroy-status` | 项目删除状态 |
+| `DELETE` | `/api/v1/containers/project/<id>` | 删除项目 |
+| `GET` | `/api/v1/containers/project/<id>/destroy-status` | 删除状态 |
 | `POST` | `/api/v1/containers/project/<id>/renew` | 续期项目 |
 
+### 镜像
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/images` | 受管镜像列表 |
+| `GET` | `/api/v1/images/detail/<ref>` | 镜像详情 |
+| `POST` | `/api/v1/images/pull` | 拉取镜像 |
+| `POST` | `/api/v1/images/pull/stream` | 拉取镜像（SSE） |
+| `DELETE` | `/api/v1/images/<ref>` | 删除镜像（`?force=true` 强制） |
+| `POST` | `/api/v1/images/prune` | 清理悬空镜像 |
+
 ### 网络
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/networks` | 受管网络列表 |
-| `GET` | `/api/v1/networks/<id>` | 受管网络详情 |
-| `POST` | `/api/v1/networks` | 创建受管网络 |
-| `PUT` | `/api/v1/networks/<id>` | 更新受管网络 |
-| `DELETE` | `/api/v1/networks/<id>` | 删除受管网络 |
+| `GET` | `/api/v1/networks/<id>` | 网络详情 |
+| `POST` | `/api/v1/networks` | 创建网络 |
+| `PUT` | `/api/v1/networks/<id>` | 更新网络（离线重建） |
+| `DELETE` | `/api/v1/networks/<id>` | 删除网络 |
 
-> 说明：网络管理仅针对 **受管网络**（`moegate.managed=true`）。已被容器占用的网络不能更新或删除；更新采用“离线重建”策略，因此只允许修改空闲网络。
+被容器占用的网络不可更新或删除。
 
 ### FRP
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/frp/proxies` | 代理列表 |
@@ -185,76 +166,55 @@ npm run build
 | `GET` | `/api/v1/frp/proxies/<name>` | 代理详情 |
 | `PUT` | `/api/v1/frp/proxies/<name>` | 更新代理 |
 | `DELETE` | `/api/v1/frp/proxies/<name>` | 删除代理 |
-| `GET` | `/api/v1/frp/config` | 完整 FRP 配置 |
-| `POST` | `/api/v1/frp/reload` | 热重载 FRP 配置 |
-| `GET` | `/api/v1/frp/health` | FRP 健康检查 |
-| `GET` | `/api/v1/frp/settings` | FRP 设置 |
-| `PUT` | `/api/v1/frp/settings` | 更新 FRP 设置 |
-
-### 镜像
-| 方法 | 路径 | 说明 |
-|------|------|------|
-| `GET` | `/api/v1/images` | 受管镜像列表与统计 |
-| `GET` | `/api/v1/images/detail/<image_ref>` | 受管镜像详情 |
-| `POST` | `/api/v1/images/pull` | 手动拉取并登记受管镜像 |
-| `POST` | `/api/v1/images/pull/stream` | 手动拉取镜像（SSE 流式日志） |
-| `DELETE` | `/api/v1/images/<image_ref>` | 删除受管镜像 |
-| `POST` | `/api/v1/images/prune` | 清理受管悬空镜像 |
-
-> 说明：删除镜像时支持查询参数 `force=true`，用于处理同一镜像挂载多个 tag、Docker 需要强制删除的场景。
+| `GET` | `/api/v1/frp/config` | 完整配置 |
+| `POST` | `/api/v1/frp/reload` | 热重载 |
+| `GET` | `/api/v1/frp/health` | 健康检查 |
+| `GET/PUT` | `/api/v1/frp/settings` | FRP 设置 |
 
 ### 系统
+
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `GET` | `/api/v1/status` | 服务器状态 |
 | `GET` | `/api/v1/metrics` | Prometheus 指标 |
 | `POST` | `/api/v1/alerts/test` | 测试告警 |
-| `GET/PUT` | `/api/v1/settings/alerts/webhook` | 告警 Webhook 设置 |
-| `GET/PUT` | `/api/v1/settings/alerts/perf` | 性能监控与告警阈值设置 |
-| `GET/PUT` | `/api/v1/settings/image-source` | 全局镜像源 |
-| `GET/PUT` | `/api/v1/settings/webui` | WebUI 偏好 |
+| `GET/PUT` | `/api/v1/settings/alerts/webhook` | Webhook 设置 |
+| `GET/PUT` | `/api/v1/settings/alerts/perf` | 性能告警设置 |
+| `GET/PUT` | `/api/v1/settings/image-source` | 镜像源设置 |
+| `GET/PUT` | `/api/v1/settings/networking` | 网络地址池设置 |
+| `GET/PUT` | `/api/v1/settings/webui` | WebUI 设置 |
 | `GET` | `/api/v1/settings/container-defaults` | 容器默认配置 |
 
 ### 示例
 
 ```bash
-# 查看服务器状态
-curl -s http://localhost:8080/api/v1/status \
-  -H "X-API-Key: <your_key>"
+# 状态
+curl -s http://localhost:8080/api/v1/status -H "X-API-Key: <key>"
 
-# 从 Dockerfile 创建容器
+# 从 Dockerfile 创建
 curl -s -X POST http://localhost:8080/api/v1/containers \
-  -H "X-API-Key: <your_key>" \
-  -H "Content-Type: application/json" \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
   -d '{"path": "/var/containers/my-app", "max_time": 1800}'
 
-# 从镜像创建容器
+# 从镜像创建
 curl -s -X POST http://localhost:8080/api/v1/containers \
-  -H "X-API-Key: <your_key>" \
-  -H "Content-Type: application/json" \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
   -d '{"image": "nginx:latest", "max_time": 3600}'
 
-# 手动拉取镜像
+# 拉取镜像
 curl -s -X POST http://localhost:8080/api/v1/images/pull \
-  -H "X-API-Key: <your_key>" \
-  -H "Content-Type: application/json" \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
   -d '{"image": "nginx:latest"}'
 
-# 流式拉取镜像（实时查看日志）
-curl -N -X POST http://localhost:8080/api/v1/images/pull/stream \
-  -H "X-API-Key: <your_key>" \
-  -H "Content-Type: application/json" \
-  -d '{"image": "nginx:latest"}'
-
-# 创建受管网络
+# 创建网络
 curl -s -X POST http://localhost:8080/api/v1/networks \
-  -H "X-API-Key: <your_key>" \
-  -H "Content-Type: application/json" \
-  -d '{"name": "lab-net", "subnet": "172.28.0.0/16", "gateway": "172.28.0.1", "attachable": true, "labels": {"env": "test"}}'
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"name": "lab-net", "subnet": "172.28.0.0/16", "gateway": "172.28.0.1"}'
 ```
 
-## FRP 使用说明
-1. 在服务器上部署 **frps**：
+## FRP 配置
+
+1. 部署 **frps**：
 
 ```toml
 # frps.toml
@@ -276,7 +236,7 @@ maxDays = 3
 to = "frps.log"
 ```
 
-2. 在运行 MoeGate 的机器上部署 **frpc**，启用 `webServer`：
+2. 部署 **frpc**（需启用 `webServer` 供 MoeGate 调用管理 API）：
 
 ```toml
 # frpc.toml
@@ -294,20 +254,15 @@ user = "admin"
 password = "admin"
 ```
 
-> 如果设置了 `webServer.user` / `webServer.password`，需同步填写 `.env` 中的 `FRP_ADMIN_USER` / `FRP_ADMIN_PASSWORD`。
-
-3. 在 `.env` 中配置 `FRP_*` 相关变量并设置 `ENABLE_FRP=True`
-4. MoeGate 会在创建容器时自动通过 frpc 管理 API 注册/删除代理
+3. `.env` 中设置 `ENABLE_FRP=True` 并填写 `FRP_*` 变量（`FRP_SERVER_ADDR`、`FRP_ADMIN_USER`/`FRP_ADMIN_PASSWORD` 等）
+4. 容器创建时 MoeGate 自动注册 frpc 代理，删除时自动清理
 
 ## FAQ
-### 为什么容器列表为空？
-MoeGate 仅展示 `moegate.managed=true` 的**受管容器**，不会读取/操作宿主机其他容器。
 
-### 为什么网络无法更新/删除？
-受管网络在**被容器占用**时禁止更新/删除；更新采用离线重建策略，仅允许修改空闲网络。
+**容器列表为空？** MoeGate 只管理自己创建的容器（`moegate.managed=true`），不展示宿主机其他容器。
 
-### 为什么镜像删除失败？
-常见原因有两类：一是镜像仍被受管容器引用；二是同一镜像挂了多个 tag，Docker 要求使用 `force=true` 才能一次性删除。
+**网络无法更新/删除？** 被容器占用的网络禁止操作，需先释放容器。
 
-### 为什么系统设置改了但重启后丢失？
-如果 `ALLOW_RUNTIME_CONFIG_WRITE=False`，设置接口只会修改当前进程内存中的配置，不会持久化回 `.env`；生产环境这是默认的安全行为。
+**镜像删除失败？** 可能仍被容器引用，或同一镜像有多个 tag 需要 `force=true`。
+
+**设置重启后丢失？** `ALLOW_RUNTIME_CONFIG_WRITE=False`（默认）时，API 修改仅在内存生效，不写入 `.env`。
