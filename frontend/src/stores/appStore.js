@@ -68,6 +68,10 @@ export const store = reactive({
   },
   settings: {
     imageSource: '',
+    networking: {
+      composeManagedSubnetPool: '172.30.0.0/16',
+      composeManagedSubnetPrefix: 24,
+    },
     alerts: {
       webhookUrl: '',
       webhookTimeout: 5,
@@ -511,6 +515,21 @@ export async function loadImageSourceSetting() {
   return value;
 }
 
+export async function loadNetworkingSetting() {
+  const result = await apiRequest('/settings/networking');
+  const data = result?.data || {};
+  const pool = String(data.compose_managed_subnet_pool || '172.30.0.0/16');
+  const prefix = Number.isFinite(Number(data.compose_managed_subnet_prefix))
+    ? Number(data.compose_managed_subnet_prefix)
+    : 24;
+  store.settings.networking.composeManagedSubnetPool = pool;
+  store.settings.networking.composeManagedSubnetPrefix = prefix;
+  return {
+    composeManagedSubnetPool: pool,
+    composeManagedSubnetPrefix: prefix,
+  };
+}
+
 export async function loadAlertWebhookSetting() {
   const result = await apiRequest('/settings/alerts/webhook');
   const value = String(result?.data?.webhook_url || '');
@@ -577,6 +596,21 @@ export async function saveImageSourceSetting(imageSource) {
     body: { image_source: value },
   });
   store.settings.imageSource = value;
+  return result;
+}
+
+export async function saveNetworkingSetting(composeManagedSubnetPool, composeManagedSubnetPrefix) {
+  const pool = String(composeManagedSubnetPool || '').trim();
+  const prefix = Number(composeManagedSubnetPrefix);
+  const result = await apiRequest('/settings/networking', {
+    method: 'PUT',
+    body: {
+      compose_managed_subnet_pool: pool,
+      compose_managed_subnet_prefix: prefix,
+    },
+  });
+  store.settings.networking.composeManagedSubnetPool = pool;
+  store.settings.networking.composeManagedSubnetPrefix = prefix;
   return result;
 }
 

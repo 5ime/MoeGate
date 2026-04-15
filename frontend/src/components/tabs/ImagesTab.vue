@@ -19,7 +19,7 @@ import {
 const refreshing = ref(false);
 const actionPending = ref(false);
 const pulling = ref(false);
-const systemPreferencesOpening = ref(false);
+const imageSourceSettingsOpening = ref(false);
 const detailModal = ref({ open: false, title: '', data: null, loading: false });
 const pullModal = ref({ open: false, image: '' });
 const pullProgressModal = ref({ open: false, payload: null });
@@ -29,7 +29,7 @@ const filter = ref('all');
 const { confirmModal, requestConfirm, onConfirm, onCancelConfirm } = useConfirmAction();
 const { flash, isFlashing } = useFlashEffect();
 const { errorText, setError, clearError, matchesKey } = useInlineError();
-const openSystemPreferences = inject('openSystemPreferences', null);
+const openImageSourcePreferences = inject('openImageSourcePreferences', null);
 
 const filterOptions = [
   { value: 'all', label: '全部受管镜像' },
@@ -111,19 +111,19 @@ function closeDetailModal() {
 }
 
 async function openImageSourceSettings() {
-  if (systemPreferencesOpening.value) return;
-  if (typeof openSystemPreferences !== 'function') {
-    showMessage('系统偏好入口不可用', 'error');
+  if (imageSourceSettingsOpening.value) return;
+  if (typeof openImageSourcePreferences !== 'function') {
+    showMessage('镜像源设置入口不可用', 'error');
     return;
   }
 
-  systemPreferencesOpening.value = true;
+  imageSourceSettingsOpening.value = true;
   try {
-    await openSystemPreferences();
+    await openImageSourcePreferences();
   } catch (error) {
-    showMessage(error.message || '打开系统偏好失败', 'error');
+    showMessage(error.message || '打开镜像源设置失败', 'error');
   } finally {
-    systemPreferencesOpening.value = false;
+    imageSourceSettingsOpening.value = false;
   }
 }
 
@@ -246,9 +246,9 @@ function emptyStateText() {
         <div class="flex flex-wrap items-center gap-2.5">
           <button
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
-            :disabled="systemPreferencesOpening || actionPending || pulling"
+            :disabled="imageSourceSettingsOpening || actionPending || pulling"
             @click="openImageSourceSettings"
-          >镜像源设置</button>
+          >偏好设置</button>
           <button
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
             :disabled="refreshing || actionPending || pulling"

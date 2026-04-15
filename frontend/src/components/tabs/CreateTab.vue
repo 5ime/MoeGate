@@ -1,11 +1,15 @@
 <script setup>
-import { inject, onMounted, reactive, ref } from 'vue';
+import { computed, onMounted, reactive, ref } from 'vue';
 import {
   loadContainerDefaultsSetting,
   loadContainerLimitsSetting,
   loadContainers,
+  loadImageSourceSetting,
   loadManagedNetworks,
+  loadNetworkingSetting,
   saveContainerLimitsSetting,
+  saveImageSourceSetting,
+  saveNetworkingSetting,
   showMessage,
   store,
 } from '../../stores/appStore';
@@ -37,12 +41,20 @@ const form = reactive({
 const showBuildModal = ref(false);
 const buildPayload = ref(null);
 const showPreferencesModal = ref(false);
+const imageSourceInput = ref('');
+const composeManagedSubnetPool = ref('172.30.0.0/16');
+const composeManagedSubnetPrefix = ref('24');
 const maxContainersInput = ref('');
 const maxRenewTimesInput = ref('');
 const limitsLoading = ref(false);
 const limitsSaving = ref(false);
-const systemPreferencesOpening = ref(false);
-const openSystemPreferences = inject('openSystemPreferences', null);
+
+const networkHelpText = computed(() => {
+  if (form.source === 'image') {
+    return '填写后，容器会加入所选 Docker network；留空则使用默认 bridge。';
+  }
+  return '识别为 Dockerfile 时加入所选网络；识别为 Compose 时忽略此项，由 Compose 网络自动管理。';
+});
 
 function applyContainerDefaults(defaults = store.settings.containerDefaults) {
   const source = defaults || {};
@@ -155,11 +167,18 @@ function onBuildClose() {
 async function loadContainerLimits() {
   limitsLoading.value = true;
   try {
-    const limits = await loadContainerLimitsSetting();
+    const [limits, imageSource, networking] = await Promise.all([
+      loadContainerLimitsSetting(),
+      loadImageSourceSetting(),
+      loadNetworkingSetting(),
+    ]);
     maxContainersInput.value = String(limits.maxContainers ?? 30);
     maxRenewTimesInput.value = String(limits.maxRenewTimes ?? 3);
+    imageSourceInput.value = String(imageSource || '');
+    composeManagedSubnetPool.value = String(networking?.composeManagedSubnetPool || store.settings.networking.composeManagedSubnetPool || '172.30.0.0/16');
+    composeManagedSubnetPrefix.value = String(networking?.composeManagedSubnetPrefix ?? store.settings.networking.composeManagedSubnetPrefix ?? 24);
   } catch (error) {
-    showMessage(error.message || '加载容器限制设置失败', 'error');
+    showMessage(error.message || '加载偏好设置失败', 'error');
   } finally {
     limitsLoading.value = false;
   }
@@ -177,13 +196,20 @@ async function savePreferences() {
       throw new Error('最大续期次数需为非负整数');
     }
 
-    await saveContainerLimitsSetting(maxContainers, maxRenewTimes);
+    await Promise.all([
+      saveImageSourceSetting(imageSourceInput.value),
+      saveNetworkingSetting(composeManagedSubnetPool.value, composeManagedSubnetPrefix.value),
+      saveContainerLimitsSetting(maxContainers, maxRenewTimes),
+    ]);
+    imageSourceInput.value = String(store.settings.imageSource || '');
+    composeManagedSubnetPool.value = String(store.settings.networking.composeManagedSubnetPool || '172.30.0.0/16');
+    composeManagedSubnetPrefix.value = String(store.settings.networking.composeManagedSubnetPrefix ?? 24);
     maxContainersInput.value = String(store.settings.containerLimits.maxContainers);
     maxRenewTimesInput.value = String(store.settings.containerLimits.maxRenewTimes);
-    showMessage('创建偏好设置已更新', 'success');
+    showMessage('偏好设置已更新', 'success');
     closePreferencesModal();
   } catch (error) {
-    showMessage(error.message || '保存创建偏好设置失败', 'error');
+    showMessage(error.message || '保存偏好设置失败', 'error');
   } finally {
     limitsSaving.value = false;
   }
@@ -196,23 +222,6 @@ async function openPreferencesModal() {
 
 function closePreferencesModal() {
   showPreferencesModal.value = false;
-}
-
-async function openImageSourceSettings() {
-  if (systemPreferencesOpening.value) return;
-  if (typeof openSystemPreferences !== 'function') {
-    showMessage('系统偏好入口不可用', 'error');
-    return;
-  }
-
-  systemPreferencesOpening.value = true;
-  try {
-    await openSystemPreferences();
-  } catch (error) {
-    showMessage(error.message || '打开系统偏好失败', 'error');
-  } finally {
-    systemPreferencesOpening.value = false;
-  }
 }
 
 function validateEnvFormat() {
@@ -249,15 +258,10 @@ onMounted(async () => {
           <button
             type="button"
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
-            :disabled="systemPreferencesOpening"
-            @click="openImageSourceSettings"
-          >镜像源设置</button>
-          <button
-            type="button"
-            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
+            :disabled="limitsLoading || limitsSaving"
             @click="openPreferencesModal"
           >
-            创建偏好
+            偏好设置
           </button>
           <button
             type="button"
@@ -403,7 +407,7 @@ onMounted(async () => {
                   </div>
                 </div>
 
-                <p class="mt-2 text-xs leading-relaxed text-slate-500">填写后，单容器将加入该 Docker network（用于容器间互通/隔离/DNS）。</p>
+                <p class="mt-2 text-xs leading-relaxed text-slate-500">{{ networkHelpText }}</p>
               </div>
             </div>
           </div>
@@ -536,6 +540,9 @@ onMounted(async () => {
       :visible="showPreferencesModal"
       :limits-loading="limitsLoading"
       :limits-saving="limitsSaving"
+      v-model:image-source="imageSourceInput"
+      v-model:compose-managed-subnet-pool="composeManagedSubnetPool"
+      v-model:compose-managed-subnet-prefix="composeManagedSubnetPrefix"
       v-model:max-containers-input="maxContainersInput"
       v-model:max-renew-times-input="maxRenewTimesInput"
       @close="closePreferencesModal"

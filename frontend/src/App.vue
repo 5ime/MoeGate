@@ -6,6 +6,8 @@ import CreateTab from './components/tabs/CreateTab.vue';
 import FrpTab from './components/tabs/FrpTab.vue';
 import ImagesTab from './components/tabs/ImagesTab.vue';
 import NetworksTab from './components/tabs/NetworksTab.vue';
+import ImageSourcePreferencesModal from './components/system/ImageSourcePreferencesModal.vue';
+import NetworkingPreferencesModal from './components/system/NetworkingPreferencesModal.vue';
 import SystemTab from './components/tabs/SystemTab.vue';
 import SystemPreferencesModal from './components/system/SystemPreferencesModal.vue';
 import { API_PREFIX, apiRequest, getApiBase, setApiBase } from './api/client';
@@ -15,6 +17,7 @@ import {
   loadAlertWebhookSetting,
   loadFrpPanel,
   loadImageSourceSetting,
+  loadNetworkingSetting,
   refreshImagesPanel,
   refreshNetworksPanel,
   loadSystemPanel,
@@ -24,6 +27,7 @@ import {
   saveAlertPerfSettings,
   saveAlertWebhookSetting,
   saveImageSourceSetting,
+  saveNetworkingSetting,
   sendAlertWebhookTest,
   showMessage,
   store,
@@ -59,15 +63,23 @@ const loginPending = ref(false);
 const loginError = ref('');
 const authApiKeyInput = ref(null);
 const showSettings = ref(false);
+const showImageSourcePreferences = ref(false);
+const showNetworkingPreferences = ref(false);
 const showSystemPreferences = ref(false);
 const settingsApiBase = ref('');
 const settingsPollSec = ref('');
 const runtimeApiBase = ref('');
 const runtimePollSec = ref('30');
+const imageSourcePreferencesLoading = ref(false);
+const imageSourcePreferencesSaving = ref(false);
+const networkingPreferencesLoading = ref(false);
+const networkingPreferencesSaving = ref(false);
 const systemPreferencesLoading = ref(false);
 const systemPreferencesSaving = ref(false);
 const systemTestSending = ref(false);
 const imageSourceInput = ref('');
+const composeManagedSubnetPool = ref('172.30.0.0/16');
+const composeManagedSubnetPrefix = ref('24');
 const webhookUrl = ref('');
 const webhookTimeout = ref('5');
 const perfInterval = ref('300');
@@ -234,12 +246,10 @@ async function openSystemPreferences() {
 
   systemPreferencesLoading.value = true;
   try {
-    const [imageSource, webhook, perf] = await Promise.all([
-      loadImageSourceSetting(),
+    const [webhook, perf] = await Promise.all([
       loadAlertWebhookSetting(),
       loadAlertPerfSettings(),
     ]);
-    imageSourceInput.value = String(imageSource || '');
     webhookUrl.value = String(webhook?.webhookUrl || '');
     webhookTimeout.value = String(webhook?.webhookTimeout ?? 5);
     perfInterval.value = String(perf?.performanceLogInterval ?? 300);
@@ -256,6 +266,74 @@ async function openSystemPreferences() {
   }
 }
 
+async function openImageSourcePreferences() {
+  if (imageSourcePreferencesLoading.value) return;
+
+  imageSourcePreferencesLoading.value = true;
+  try {
+    const imageSource = await loadImageSourceSetting();
+    imageSourceInput.value = String(imageSource || '');
+    showImageSourcePreferences.value = true;
+  } catch (error) {
+    showMessage(error.message || '加载镜像源设置失败', 'error');
+  } finally {
+    imageSourcePreferencesLoading.value = false;
+  }
+}
+
+function closeImageSourcePreferences() {
+  showImageSourcePreferences.value = false;
+}
+
+async function saveImageSourcePreferences() {
+  imageSourcePreferencesSaving.value = true;
+  try {
+    const result = await saveImageSourceSetting(imageSourceInput.value);
+    imageSourceInput.value = store.settings.imageSource;
+    showMessage(String(result?.msg || '镜像源设置已保存'), 'success');
+    closeImageSourcePreferences();
+  } catch (error) {
+    showMessage(error.message || '保存镜像源设置失败', 'error');
+  } finally {
+    imageSourcePreferencesSaving.value = false;
+  }
+}
+
+async function openNetworkingPreferences() {
+  if (networkingPreferencesLoading.value) return;
+
+  networkingPreferencesLoading.value = true;
+  try {
+    const networking = await loadNetworkingSetting();
+    composeManagedSubnetPool.value = String(networking?.composeManagedSubnetPool || store.settings.networking.composeManagedSubnetPool || '172.30.0.0/16');
+    composeManagedSubnetPrefix.value = String(networking?.composeManagedSubnetPrefix ?? store.settings.networking.composeManagedSubnetPrefix ?? 24);
+    showNetworkingPreferences.value = true;
+  } catch (error) {
+    showMessage(error.message || '加载 Compose 网络池设置失败', 'error');
+  } finally {
+    networkingPreferencesLoading.value = false;
+  }
+}
+
+function closeNetworkingPreferences() {
+  showNetworkingPreferences.value = false;
+}
+
+async function saveNetworkingPreferences() {
+  networkingPreferencesSaving.value = true;
+  try {
+    const result = await saveNetworkingSetting(composeManagedSubnetPool.value, composeManagedSubnetPrefix.value);
+    composeManagedSubnetPool.value = String(store.settings.networking.composeManagedSubnetPool || '172.30.0.0/16');
+    composeManagedSubnetPrefix.value = String(store.settings.networking.composeManagedSubnetPrefix ?? 24);
+    showMessage(String(result?.msg || 'Compose 网络池设置已保存'), 'success');
+    closeNetworkingPreferences();
+  } catch (error) {
+    showMessage(error.message || '保存 Compose 网络池设置失败', 'error');
+  } finally {
+    networkingPreferencesSaving.value = false;
+  }
+}
+
 function closeSystemPreferences() {
   showSystemPreferences.value = false;
 }
@@ -263,8 +341,7 @@ function closeSystemPreferences() {
 async function saveSystemPreferences() {
   systemPreferencesSaving.value = true;
   try {
-    const [imageResult, webhookResult, perfResult] = await Promise.all([
-      saveImageSourceSetting(imageSourceInput.value),
+    const [webhookResult, perfResult] = await Promise.all([
       saveAlertWebhookSetting(webhookUrl.value, webhookTimeout.value),
       saveAlertPerfSettings({
         performanceLogInterval: Number(perfInterval.value),
@@ -275,8 +352,7 @@ async function saveSystemPreferences() {
         alertCooldownSec: Number(cooldownSec.value),
       }),
     ]);
-    imageSourceInput.value = store.settings.imageSource;
-    const msg = String((perfResult?.msg || webhookResult?.msg || imageResult?.msg) || '系统偏好已保存');
+    const msg = String((perfResult?.msg || webhookResult?.msg) || '系统偏好已保存');
     showMessage(msg, 'success');
     closeSystemPreferences();
     if (store.activeTab === 'system') {
@@ -301,6 +377,8 @@ async function sendSystemWebhookTest() {
   }
 }
 
+provide('openImageSourcePreferences', openImageSourcePreferences);
+provide('openNetworkingPreferences', openNetworkingPreferences);
 provide('openSystemPreferences', openSystemPreferences);
 
 async function saveSettings() {
@@ -691,11 +769,27 @@ onUnmounted(() => {
       </template>
     </BaseModal>
 
+    <ImageSourcePreferencesModal
+      :visible="showImageSourcePreferences"
+      :saving="imageSourcePreferencesSaving"
+      v-model:image-source="imageSourceInput"
+      @close="closeImageSourcePreferences"
+      @save="saveImageSourcePreferences"
+    />
+
+    <NetworkingPreferencesModal
+      :visible="showNetworkingPreferences"
+      :saving="networkingPreferencesSaving"
+      v-model:compose-managed-subnet-pool="composeManagedSubnetPool"
+      v-model:compose-managed-subnet-prefix="composeManagedSubnetPrefix"
+      @close="closeNetworkingPreferences"
+      @save="saveNetworkingPreferences"
+    />
+
     <SystemPreferencesModal
       :visible="showSystemPreferences"
       :saving="systemPreferencesSaving"
       :test-sending="systemTestSending"
-      v-model:image-source="imageSourceInput"
       v-model:webhook-url="webhookUrl"
       v-model:webhook-timeout="webhookTimeout"
       v-model:perf-interval="perfInterval"

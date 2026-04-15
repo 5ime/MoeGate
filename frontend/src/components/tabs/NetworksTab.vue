@@ -1,5 +1,5 @@
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, inject, ref } from 'vue';
 import ConfirmModal from '../ConfirmModal.vue';
 import KeyValueLinesEditor from '../KeyValueLinesEditor.vue';
 import SearchSelectBar from '../SearchSelectBar.vue';
@@ -21,11 +21,13 @@ const refreshing = ref(false);
 const saving = ref(false);
 const actionPending = ref(false);
 const detailLoading = ref(false);
+const networkingSettingsOpening = ref(false);
 const search = ref('');
 const usageFilter = ref('all');
 const formModal = ref({ open: false, mode: 'create', networkId: '', originalName: '' });
 const detailModal = ref({ open: false, title: '', data: null });
 const form = ref(createEmptyForm());
+const openNetworkingPreferences = inject('openNetworkingPreferences', null);
 
 const { confirmModal, requestConfirm, onConfirm, onCancelConfirm } = useConfirmAction();
 const { flash, isFlashing } = useFlashEffect();
@@ -168,6 +170,23 @@ async function refresh() {
   }
 }
 
+async function openNetworkingSettings() {
+  if (networkingSettingsOpening.value) return;
+  if (typeof openNetworkingPreferences !== 'function') {
+    showMessage('Compose 网络池入口不可用', 'error');
+    return;
+  }
+
+  networkingSettingsOpening.value = true;
+  try {
+    await openNetworkingPreferences();
+  } catch (error) {
+    showMessage(error.message || '打开 Compose 网络池失败', 'error');
+  } finally {
+    networkingSettingsOpening.value = false;
+  }
+}
+
 async function submitForm() {
   try {
     clearError();
@@ -260,6 +279,11 @@ function emptyStateText() {
           <h2 class="mt-1 text-[24px] font-semibold leading-tight tracking-tight text-slate-900">受管网络</h2>
         </div>
         <div class="flex flex-wrap items-center gap-2.5">
+          <button
+            class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
+            :disabled="networkingSettingsOpening || refreshing || saving || actionPending"
+            @click="openNetworkingSettings"
+          >偏好设置</button>
           <button
             class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55"
             :disabled="refreshing || saving || actionPending"
