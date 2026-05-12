@@ -116,6 +116,12 @@ def _is_network_pool_exhausted_error(exc: Exception) -> bool:
     )
 
 
+def _is_network_pool_overlap_error(exc: Exception) -> bool:
+    """判断是否为 Docker 返回的子网重叠错误。"""
+    message = _extract_docker_error_message(exc).lower()
+    return "pool overlaps with other one on this address space" in message
+
+
 def _network_attrs(network) -> Dict[str, Any]:
     attrs = getattr(network, "attrs", None) or {}
     if not attrs and hasattr(network, "reload"):
@@ -205,27 +211,49 @@ def _extract_compose_network_ipam(cfg: Dict[str, Any]):
 
 
 def _extract_network_subnets(network) -> List[ipaddress._BaseNetwork]:
+    def _parse_subnets(attrs: Dict[str, Any]) -> List[ipaddress._BaseNetwork]:
+        configs = ((attrs.get("IPAM") or {}).get("Config") or [])
+        parsed: List[ipaddress._BaseNetwork] = []
+        for item in configs:
+            if not isinstance(item, dict):
+                continue
+            subnet = str(item.get("Subnet") or "").strip()
+            if not subnet:
+                continue
+            try:
+                parsed.append(ipaddress.ip_network(subnet, strict=False))
+            except ValueError:
+                logger.debug("忽略非法网络子网配置: %s", subnet)
+        return parsed
+
     attrs = _network_attrs(network)
-    configs = ((attrs.get("IPAM") or {}).get("Config") or [])
-    subnets: List[ipaddress._BaseNetwork] = []
-    for item in configs:
-        if not isinstance(item, dict):
-            continue
-        subnet = str(item.get("Subnet") or "").strip()
-        if not subnet:
-            continue
+    subnets = _parse_subnets(attrs)
+
+    # 某些 Docker 环境 list() 返回的 attrs 可能缺失最新 IPAM 信息，这里补一次强制刷新。
+    if not subnets and hasattr(network, "reload"):
         try:
-            subnets.append(ipaddress.ip_network(subnet, strict=False))
-        except ValueError:
-            logger.debug("忽略非法网络子网配置: %s", subnet)
+            network.reload()
+            attrs = getattr(network, "attrs", None) or attrs
+            subnets = _parse_subnets(attrs)
+        except Exception:
+            logger.debug("刷新网络 IPAM 信息失败: %s", getattr(network, "name", getattr(network, "id", "unknown")), exc_info=True)
+
     return subnets
 
 
-def _find_available_compose_subnet(client, compose_project_id: str, network_key: str, app_config: AppConfig = None) -> ipaddress.IPv4Network:
+def _find_available_compose_subnet(
+    client,
+    compose_project_id: str,
+    network_key: str,
+    app_config: AppConfig = None,
+    excluded_subnets: Optional[set] = None,
+) -> ipaddress.IPv4Network:
     managed_pool, managed_prefix = _get_compose_managed_subnet_config(app_config)
     candidates = tuple(managed_pool.subnets(new_prefix=managed_prefix))
     if not candidates:
         raise NetworkProvisionError("未配置可用的 Compose 网络地址池")
+
+    excluded = {str(item) for item in (excluded_subnets or set())}
 
     occupied: List[ipaddress._BaseNetwork] = []
     for network in client.networks.list():
@@ -236,6 +264,8 @@ def _find_available_compose_subnet(client, compose_project_id: str, network_key:
 
     for offset in range(len(candidates)):
         candidate = candidates[(start_index + offset) % len(candidates)]
+        if str(candidate) in excluded:
+            continue
         if any(candidate.overlaps(existing) for existing in occupied):
             continue
         return candidate
@@ -301,46 +331,76 @@ def _prune_unused_managed_networks(client, exclude_names: Optional[List[str]] = 
 
 
 def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], compose_project_id: str, network_key: str, app_config: AppConfig = None):
-    """创建 Compose 网络，地址池耗尽时尝试清理闲置受管网络后重试一次。"""
-    create_kwargs = {
-        "driver": str(cfg.get("driver") or "bridge"),
+    """创建 Compose 网络，支持在子网冲突时自动换段重试。"""
+    driver = str(cfg.get("driver") or "bridge")
+    base_create_kwargs = {
+        "driver": driver,
         "attachable": bool(cfg.get("attachable", False)),
         "labels": {
             "moegate.managed": "true",
             "moegate.compose_project_id": compose_project_id,
         },
     }
-    ipam = _build_managed_compose_network_ipam(client, compose_project_id, network_key, cfg, app_config=app_config)
-    if ipam is not None:
-        create_kwargs["ipam"] = ipam
 
-    try:
-        client.networks.create(resolved_name, **create_kwargs)
-        return
-    except docker.errors.APIError as exc:
-        if not _is_network_pool_exhausted_error(exc):
+    explicit_ipam = _extract_compose_network_ipam(cfg)
+    if explicit_ipam is not None:
+        logger.warning(
+            "Compose 网络检测到显式 IPAM 配置，已忽略并强制使用受管地址池: network=%s project=%s",
+            resolved_name,
+            compose_project_id,
+        )
+
+    if driver.strip().lower() != "bridge":
+        try:
+            client.networks.create(resolved_name, **base_create_kwargs)
+            return
+        except docker.errors.APIError as exc:
             raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
 
-        removed_networks = _prune_unused_managed_networks(client, exclude_names=[resolved_name])
-        if removed_networks:
-            logger.warning(
-                "Docker 网络地址池耗尽，已清理 %d 个未使用的 MoeGate 网络后重试: %s",
-                len(removed_networks),
-                ", ".join(removed_networks),
-            )
-        else:
-            raise NetworkProvisionError(
-                "Docker 网络地址池已耗尽，无法为 Compose 项目创建网络。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
-            )
+    overlap_candidates: set = set()
+    prune_attempted = False
+    while True:
+        subnet = _find_available_compose_subnet(
+            client,
+            compose_project_id,
+            network_key,
+            app_config=app_config,
+            excluded_subnets=overlap_candidates,
+        )
+        gateway = str(next(subnet.hosts(), subnet.network_address))
 
-    try:
-        client.networks.create(resolved_name, **create_kwargs)
-    except docker.errors.APIError as exc:
-        if _is_network_pool_exhausted_error(exc):
-            raise NetworkProvisionError(
-                "Docker 网络地址池已耗尽，已尝试清理未使用的 MoeGate 网络但仍无法分配子网。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
-            )
-        raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
+        create_kwargs = dict(base_create_kwargs)
+        create_kwargs["ipam"] = _build_ipam_config(str(subnet), gateway)
+
+        try:
+            client.networks.create(resolved_name, **create_kwargs)
+            return
+        except docker.errors.APIError as exc:
+            if _is_network_pool_overlap_error(exc):
+                overlap_candidates.add(str(subnet))
+                logger.warning("Compose 网络子网冲突，自动切换下一个子网重试: network=%s subnet=%s", resolved_name, subnet)
+                continue
+
+            if _is_network_pool_exhausted_error(exc):
+                if prune_attempted:
+                    raise NetworkProvisionError(
+                        "Docker 网络地址池已耗尽，已尝试清理未使用的 MoeGate 网络但仍无法分配子网。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
+                    )
+
+                removed_networks = _prune_unused_managed_networks(client, exclude_names=[resolved_name])
+                prune_attempted = True
+                if removed_networks:
+                    logger.warning(
+                        "Docker 网络地址池耗尽，已清理 %d 个未使用的 MoeGate 网络后重试: %s",
+                        len(removed_networks),
+                        ", ".join(removed_networks),
+                    )
+                    continue
+                raise NetworkProvisionError(
+                    "Docker 网络地址池已耗尽，无法为 Compose 项目创建网络。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
+                )
+
+            raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
 
 
 def _resolve_image_reference(image: str, image_source: Optional[str] = None) -> str:
