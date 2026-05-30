@@ -2,6 +2,7 @@
 import hashlib
 import ipaddress
 import os
+import re
 import yaml
 import docker
 import random
@@ -9,7 +10,7 @@ import logging
 import types
 from contextlib import contextmanager
 import uuid
-from typing import Dict, Any, Optional, List, Tuple
+from typing import Dict, Any, Optional, List, Tuple, Set
 from datetime import datetime
 from docker.types import IPAMConfig, IPAMPool
 from config.settings import config as default_config, AppConfig
@@ -23,6 +24,13 @@ from infra.docker import (
     ensure_client,
 )
 from utils.container_manager import get_container_manager
+from utils.docker_image import (
+    extract_docker_error_message,
+    format_pull_error_message,
+    format_pull_progress_event,
+    resolve_image_reference,
+    split_image_reference,
+)
 from utils.image_registry import register_managed_image
 from services.container.port_manager import get_container_ports, process_service_ports, get_port_info
 from services.container.info import get_container_info
@@ -34,82 +42,14 @@ DEFAULT_COMPOSE_MANAGED_SUBNET_POOL = "172.30.0.0/16"
 DEFAULT_COMPOSE_MANAGED_SUBNET_PREFIX = 24
 
 
-def _extract_docker_error_message(exc: Exception) -> str:
-    """提取 Docker SDK 异常中的可读错误信息。"""
-    explanation = getattr(exc, "explanation", None)
-    if isinstance(explanation, bytes):
-        try:
-            explanation = explanation.decode("utf-8", errors="ignore")
-        except Exception:
-            explanation = None
-
-    message = str(explanation or exc or "").strip()
-    return message or "Docker 操作失败"
-
-
-def _split_image_reference(image_ref: str) -> Tuple[str, Optional[str]]:
-    """拆分镜像引用为 repository 与 tag/digest。"""
-    text = str(image_ref or "").strip()
-    if not text:
-        return "", None
-
-    if "@" in text:
-        repository, digest = text.rsplit("@", 1)
-        return repository, digest or None
-
-    last_slash = text.rfind("/")
-    last_colon = text.rfind(":")
-    if last_colon > last_slash:
-        return text[:last_colon], text[last_colon + 1:] or None
-
-    return text, None
-
-
-def _format_pull_progress_event(chunk: Dict[str, Any]) -> Optional[str]:
-    status = str(chunk.get("status") or "").strip()
-    identifier = str(chunk.get("id") or "").strip()
-    progress = str(chunk.get("progress") or "").strip()
-    if not status:
-        return None
-
-    parts = [status]
-    if identifier:
-        parts.append(identifier)
-    line = " | ".join(parts)
-    if progress:
-        line = f"{line} {progress}"
-    return line
-
-
-def _is_pull_not_found_message(message: str) -> bool:
-    text = str(message or "").strip().lower()
-    if not text:
-        return False
-    if "access denied" in text or "denied:" in text:
-        return False
-    return "manifest unknown" in text or "not found" in text or "failed to resolve reference" in text
-
-
-def _build_pull_not_found_hint(requested_image: str, resolved_image: str) -> str:
-    requested = str(requested_image or "").strip()
-    candidate = requested or str(resolved_image or "").strip()
-    image_name = candidate.split("/", 1)[-1].split("@", 1)[0].split(":", 1)[0].strip().lower()
-    if image_name == "apache":
-        return "Docker Hub 官方 Apache HTTP Server 镜像通常使用 httpd:latest。"
-    return f"请确认镜像名 {candidate or resolved_image} 是否正确，或当前镜像源是否提供该镜像。"
-
-
 def _raise_pull_image_error(message: str, requested_image: str, resolved_image: str):
-    normalized = str(message or "").strip() or "未知错误"
-    if _is_pull_not_found_message(normalized):
-        hint = _build_pull_not_found_hint(requested_image, resolved_image)
-        raise ImageBuildError(f"未找到可拉取镜像: {resolved_image}。{hint}")
-    raise ImageBuildError(f"拉取镜像失败: {normalized}")
+    _, error_message = format_pull_error_message(message, requested_image, resolved_image)
+    raise ImageBuildError(error_message)
 
 
 def _is_network_pool_exhausted_error(exc: Exception) -> bool:
     """判断是否为 Docker 默认地址池耗尽错误。"""
-    message = _extract_docker_error_message(exc).lower()
+    message = extract_docker_error_message(exc).lower()
     return (
         "all predefined address pools have been fully subnetted" in message
         or "could not find an available, non-overlapping ipv4 address pool" in message
@@ -118,7 +58,7 @@ def _is_network_pool_exhausted_error(exc: Exception) -> bool:
 
 def _is_network_pool_overlap_error(exc: Exception) -> bool:
     """判断是否为 Docker 返回的子网重叠错误。"""
-    message = _extract_docker_error_message(exc).lower()
+    message = extract_docker_error_message(exc).lower()
     return "pool overlaps with other one on this address space" in message
 
 
@@ -355,7 +295,7 @@ def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], com
             client.networks.create(resolved_name, **base_create_kwargs)
             return
         except docker.errors.APIError as exc:
-            raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
+            raise NetworkProvisionError(f"创建 Compose 网络失败: {extract_docker_error_message(exc)}")
 
     overlap_candidates: set = set()
     prune_attempted = False
@@ -400,42 +340,7 @@ def _create_compose_network(client, resolved_name: str, cfg: Dict[str, Any], com
                     "Docker 网络地址池已耗尽，无法为 Compose 项目创建网络。请删除未使用的 Compose 项目，或执行 docker network prune 后重试。"
                 )
 
-            raise NetworkProvisionError(f"创建 Compose 网络失败: {_extract_docker_error_message(exc)}")
-
-
-def _resolve_image_reference(image: str, image_source: Optional[str] = None) -> str:
-    """根据可选镜像源拼接或改写镜像引用。"""
-    image_ref = str(image or "").strip()
-    if not image_ref:
-        raise ImageBuildError("镜像名不能为空")
-
-    source = str(image_source or "").strip()
-    if not source:
-        return image_ref
-
-    source = source.rstrip("/")
-    if source.startswith("http://"):
-        source = source[len("http://"):]
-    elif source.startswith("https://"):
-        source = source[len("https://"):]
-
-    if not source:
-        raise ImageBuildError("镜像源不能为空")
-
-    # 判断镜像是否已包含 registry 前缀
-    # 只看 "/" 前的部分；需排除 tag 中的 ":" 干扰（如 nginx:latest）
-    parts = image_ref.split("/", 1)
-    first_segment = parts[0].split(":")[0]  # 去掉端口或 tag
-    has_registry = ("." in first_segment or first_segment == "localhost") and len(parts) > 1
-
-    if not has_registry:
-        return f"{source}/{image_ref}"
-
-    if image_ref.startswith(f"{source}/"):
-        return image_ref
-
-    _, remainder = image_ref.split("/", 1)
-    return f"{source}/{remainder}"
+            raise NetworkProvisionError(f"创建 Compose 网络失败: {extract_docker_error_message(exc)}")
 
 
 def _extract_host_ports_from_bindings(ports: Dict[str, tuple]) -> List[int]:
@@ -511,7 +416,7 @@ def ensure_image_available(
 
     requested_image = str(image or "").strip()
     image_source = getattr(app_config, "IMAGE_SOURCE", None)
-    resolved_image = _resolve_image_reference(image, image_source)
+    resolved_image = resolve_image_reference(image, image_source)
 
     try:
         image_obj = client.images.get(resolved_image)
@@ -528,7 +433,7 @@ def ensure_image_available(
         if progress_messages is not None:
             progress_messages.append(f"镜像不存在，正在自动拉取: {resolved_image}")
     except docker.errors.APIError as e:
-        raise ImageBuildError(f"获取镜像失败: {_extract_docker_error_message(e)}")
+        raise ImageBuildError(f"获取镜像失败: {extract_docker_error_message(e)}")
 
     try:
         image_obj = client.images.pull(resolved_image)
@@ -548,7 +453,7 @@ def ensure_image_available(
     except docker.errors.ImageNotFound:
         _raise_pull_image_error("not found", requested_image, resolved_image)
     except docker.errors.APIError as e:
-        _raise_pull_image_error(_extract_docker_error_message(e), requested_image, resolved_image)
+        _raise_pull_image_error(extract_docker_error_message(e), requested_image, resolved_image)
 
 
 def ensure_image_available_streaming(
@@ -567,7 +472,7 @@ def ensure_image_available_streaming(
 
     requested_image = str(image or "").strip()
     image_source = getattr(app_config, "IMAGE_SOURCE", None)
-    resolved_image = _resolve_image_reference(image, image_source)
+    resolved_image = resolve_image_reference(image, image_source)
 
     try:
         image_obj = client.images.get(resolved_image)
@@ -584,7 +489,7 @@ def ensure_image_available_streaming(
         logger.info("镜像 %s 不存在，开始自动拉取", resolved_image)
         yield f"镜像不存在，正在自动拉取: {resolved_image}"
     except docker.errors.APIError as e:
-        raise ImageBuildError(f"获取镜像失败: {_extract_docker_error_message(e)}")
+        raise ImageBuildError(f"获取镜像失败: {extract_docker_error_message(e)}")
 
     api_pull = getattr(getattr(client, "api", None), "pull", None)
     if not callable(api_pull):
@@ -600,7 +505,7 @@ def ensure_image_available_streaming(
                 yield line
         return resolved_image, image_obj
 
-    repository, tag = _split_image_reference(resolved_image)
+    repository, tag = split_image_reference(resolved_image)
     try:
         for chunk in api_pull(repository=repository, tag=tag, stream=True, decode=True):
             if not isinstance(chunk, dict):
@@ -609,7 +514,7 @@ def ensure_image_available_streaming(
             if chunk.get("error"):
                 _raise_pull_image_error(str(chunk.get("error") or "").strip(), requested_image, resolved_image)
 
-            line = _format_pull_progress_event(chunk)
+            line = format_pull_progress_event(chunk)
             if line:
                 yield line
 
@@ -632,7 +537,7 @@ def ensure_image_available_streaming(
     except docker.errors.ImageNotFound:
         _raise_pull_image_error("not found", requested_image, resolved_image)
     except docker.errors.APIError as e:
-        _raise_pull_image_error(_extract_docker_error_message(e), requested_image, resolved_image)
+        _raise_pull_image_error(extract_docker_error_message(e), requested_image, resolved_image)
 
 
 @contextmanager
@@ -1127,6 +1032,124 @@ def start_from_dockerfile(path: str, uid: int, cmd: Optional[str], min_port: int
     }
 
 
+_COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
+
+
+def _parse_service_environment(service_env: Any) -> Dict[str, str]:
+    """将 compose service.environment 规范化为字符串字典。"""
+    if isinstance(service_env, list):
+        merged_env: Dict[str, str] = {}
+        for item in service_env:
+            if isinstance(item, str) and "=" in item:
+                key, value = item.split("=", 1)
+                merged_env[key] = value
+        return merged_env
+    if isinstance(service_env, dict):
+        return {str(key): "" if value is None else str(value) for key, value in service_env.items()}
+    return {}
+
+
+def _substitute_compose_vars(value: str, context: Dict[str, str]) -> str:
+    """替换 compose 中的 ${VAR} 占位符。"""
+    def replacer(match: re.Match) -> str:
+        var_name = match.group(1).strip()
+        if var_name in context:
+            return context[var_name]
+        return match.group(0)
+
+    return _COMPOSE_VAR_PATTERN.sub(replacer, value)
+
+
+def _substitute_compose_value(value: Any, context: Dict[str, str]) -> Any:
+    """递归替换字符串或 command 列表中的 ${VAR} 占位符。"""
+    if isinstance(value, str):
+        return _substitute_compose_vars(value, context)
+    if isinstance(value, list):
+        return [_substitute_compose_value(item, context) for item in value]
+    return value
+
+
+def _collect_compose_var_references(value: Any) -> Set[str]:
+    """收集字符串或 command 列表中的 ${VAR} 占位符名称。"""
+    refs: Set[str] = set()
+    if isinstance(value, str):
+        for match in _COMPOSE_VAR_PATTERN.finditer(value):
+            name = match.group(1).strip()
+            if name:
+                refs.add(name)
+    elif isinstance(value, list):
+        for item in value:
+            refs.update(_collect_compose_var_references(item))
+    return refs
+
+
+def _collect_service_var_references(service: Dict[str, Any]) -> Set[str]:
+    """收集 compose service 在 environment / command 中引用的 ${VAR} 名称。"""
+    refs: Set[str] = set()
+    compose_env = _parse_service_environment(service.get("environment"))
+    for value in compose_env.values():
+        refs.update(_collect_compose_var_references(value))
+    refs.update(_collect_compose_var_references(service.get("command")))
+    return refs
+
+
+def _generate_service_flag() -> str:
+    """为 compose service 生成唯一 FLAG。"""
+    return f"flag{{{uuid.uuid4()}}}"
+
+
+def _resolve_compose_service_env(
+    service: Dict[str, Any],
+    global_env: Optional[Dict[str, Any]] = None,
+    multi_service: bool = False,
+) -> Dict[str, str]:
+    """合并 compose / 全局环境变量，并解析 ${VAR}。"""
+    merged_env = _parse_service_environment(service.get("environment"))
+    referenced_vars = _collect_service_var_references(service)
+
+    filtered_global = dict(global_env or {})
+    # 多 service compose 中 FLAG 需按 service 独立注入，避免全局 env 覆盖成同一个值
+    if multi_service and "FLAG" in filtered_global and "FLAG" in referenced_vars:
+        filtered_global.pop("FLAG", None)
+    if filtered_global:
+        merged_env.update({str(key): "" if value is None else str(value) for key, value in filtered_global.items()})
+
+    for var_name in referenced_vars:
+        current = merged_env.get(var_name, "")
+        if not current or f"${{{var_name}}}" in current:
+            merged_env[var_name] = _generate_service_flag()
+
+    context = {str(key): str(value) for key, value in merged_env.items()}
+    for _ in range(10):
+        changed = False
+        resolved: Dict[str, str] = {}
+        for key, value in context.items():
+            new_value = _substitute_compose_vars(value, context)
+            resolved[key] = new_value
+            if new_value != value:
+                changed = True
+        context = resolved
+        if not changed:
+            break
+    return context
+
+
+def _apply_compose_service_env(
+    service: Dict[str, Any],
+    global_env: Optional[Dict[str, Any]] = None,
+    multi_service: bool = False,
+) -> None:
+    """为 compose service 注入环境变量，并替换 command 中的 ${VAR}。"""
+    resolved_env = _resolve_compose_service_env(
+        service=service,
+        global_env=global_env,
+        multi_service=multi_service,
+    )
+    service["environment"] = resolved_env
+    if "command" in service:
+        service["command"] = _substitute_compose_value(service.get("command"), resolved_env)
+
+
 def start_from_compose(
     compose_path: str,
     uid: int,
@@ -1169,28 +1192,18 @@ def start_from_compose(
             app_config=app_config,
         )
 
-        for name, service in content.get("services", {}).items():
+        services = content.get("services", {}) or {}
+        multi_service = len(services) > 1
+
+        for name, service in services.items():
             # 使用 UUID 作为容器名称，如果是多个服务则使用独立的 UUID
-            if len(content.get("services", {})) > 1:
+            if multi_service:
                 service_uuid = str(uuid.uuid4())
                 service["container_name"] = service_uuid
             else:
                 service["container_name"] = uid
             service["image"] = service.get("image", name)
-            service_env = service.get("environment") or {}
-            if isinstance(service_env, list):
-                merged_env = {}
-                for item in service_env:
-                    if isinstance(item, str) and "=" in item:
-                        key, value = item.split("=", 1)
-                        merged_env[key] = value
-                service_env = merged_env
-            elif not isinstance(service_env, dict):
-                service_env = {}
-
-            merged_env = dict(service_env)
-            merged_env.update(env or {})
-            service["environment"] = merged_env
+            _apply_compose_service_env(service, env, multi_service=multi_service)
             service["ports"] = process_service_ports(service, app_config)
             service["_compose_project_id"] = compose_project_id
             service["_compose_service_name"] = name
@@ -1510,27 +1523,17 @@ def _start_from_compose_streaming(compose_path: str, uid, max_time: int, env: Di
             client=client, compose_content=content, compose_project_id=compose_project_id, app_config=app_config,
         )
 
-        for name, service in content.get("services", {}).items():
-            if len(content.get("services", {})) > 1:
+        services = content.get("services", {}) or {}
+        multi_service = len(services) > 1
+
+        for name, service in services.items():
+            if multi_service:
                 service_uuid = str(uuid.uuid4())
                 service["container_name"] = service_uuid
             else:
                 service["container_name"] = uid
             service["image"] = service.get("image", name)
-
-            service_env = service.get("environment") or {}
-            if isinstance(service_env, list):
-                merged_env = {}
-                for item in service_env:
-                    if isinstance(item, str) and "=" in item:
-                        key, value = item.split("=", 1)
-                        merged_env[key] = value
-                service_env = merged_env
-            elif not isinstance(service_env, dict):
-                service_env = {}
-            merged_env = dict(service_env)
-            merged_env.update(env or {})
-            service["environment"] = merged_env
+            _apply_compose_service_env(service, env, multi_service=multi_service)
             service["ports"] = process_service_ports(service, app_config)
             service["_compose_project_id"] = compose_project_id
             service["_compose_service_name"] = name
@@ -1554,7 +1557,7 @@ def _start_from_compose_streaming(compose_path: str, uid, max_time: int, env: Di
                         continue
                     yield f"[{name}] {line}"
 
-            image_preview = _resolve_image_reference(service["image"], getattr(app_config, "IMAGE_SOURCE", None))
+            image_preview = resolve_image_reference(service["image"], getattr(app_config, "IMAGE_SOURCE", None))
             yield f"[{name}] 正在检查镜像: {image_preview}"
             image_stream = ensure_image_available_streaming(
                 service["image"],
@@ -1729,7 +1732,7 @@ def start_from_image_streaming(
         raise DockerConnectionError("Docker客户端不可用")
 
     image_source = getattr(app_config, "IMAGE_SOURCE", None)
-    resolved_image = _resolve_image_reference(image, image_source)
+    resolved_image = resolve_image_reference(image, image_source)
     yield f"正在检查镜像: {resolved_image}"
     image_stream = ensure_image_available_streaming(
         image,

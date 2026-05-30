@@ -6,7 +6,13 @@ import docker
 from config import AppConfig, config as default_config
 from core.exceptions import ContainerServiceError, DockerConnectionError, ValidationError
 from infra.docker import ensure_client
-from services.container.builder import _resolve_image_reference
+from utils.docker_image import (
+    extract_docker_error_message,
+    format_pull_error_message,
+    format_pull_progress_event,
+    resolve_image_reference,
+    split_image_reference,
+)
 from utils.image_registry import (
     list_managed_image_records,
     register_managed_image,
@@ -16,32 +22,9 @@ from utils.image_registry import (
 )
 
 
-def _docker_error_message(exc: Exception) -> str:
-    explanation = getattr(exc, "explanation", None)
-    if isinstance(explanation, bytes):
-        try:
-            explanation = explanation.decode("utf-8", errors="ignore")
-        except Exception:
-            explanation = None
-    text = str(explanation or exc or "").strip()
-    return text or "Docker 操作失败"
-
-
-def _is_pull_not_found_message(message: str) -> bool:
-    text = str(message or "").strip().lower()
-    if not text:
-        return False
-    if "access denied" in text or "denied:" in text:
-        return False
-    return "manifest unknown" in text or "not found" in text or "failed to resolve reference" in text
-
-
 def _raise_pull_error(message: str, requested_image: str, resolved_image: str, default_code: int = 500):
-    normalized = str(message or "").strip() or "未知错误"
-    if _is_pull_not_found_message(normalized):
-        hint = f"请确认镜像名 {requested_image or resolved_image} 是否正确，或当前镜像源是否提供该镜像。"
-        raise ContainerServiceError(f"未找到可拉取镜像: {resolved_image}。{hint}", 404)
-    raise ContainerServiceError(f"拉取镜像失败: {normalized}", default_code)
+    is_not_found, error_message = format_pull_error_message(message, requested_image, resolved_image)
+    raise ContainerServiceError(error_message, 404 if is_not_found else default_code)
 
 
 def _format_bytes(size_bytes: int) -> str:
@@ -66,40 +49,6 @@ def _normalize_tags(tags: Optional[List[str]]) -> List[str]:
     return normalized
 
 
-def _split_image_reference(image_ref: str) -> Tuple[str, Optional[str]]:
-    """拆分镜像引用为 repository 与 tag/digest。"""
-    text = str(image_ref or "").strip()
-    if not text:
-        return "", None
-
-    if "@" in text:
-        repository, digest = text.rsplit("@", 1)
-        return repository, digest or None
-
-    last_slash = text.rfind("/")
-    last_colon = text.rfind(":")
-    if last_colon > last_slash:
-        return text[:last_colon], text[last_colon + 1:] or None
-
-    return text, None
-
-
-def _format_pull_progress_event(chunk: Dict[str, Any]) -> Optional[str]:
-    status = str(chunk.get("status") or "").strip()
-    identifier = str(chunk.get("id") or "").strip()
-    progress = str(chunk.get("progress") or "").strip()
-    if not status:
-        return None
-
-    parts = [status]
-    if identifier:
-        parts.append(identifier)
-    line = " | ".join(parts)
-    if progress:
-        line = f"{line} {progress}"
-    return line
-
-
 def _normalize_container_name(container) -> str:
     name = str(getattr(container, "name", "") or "").strip()
     if name:
@@ -107,33 +56,6 @@ def _normalize_container_name(container) -> str:
     attrs = getattr(container, "attrs", None) or {}
     raw = str(attrs.get("Name") or "").strip()
     return raw.lstrip("/")
-
-
-def _collect_image_usage(client) -> Tuple[Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
-    usage_count: Dict[str, int] = {}
-    usage_refs: Dict[str, List[Dict[str, Any]]] = {}
-
-    try:
-        containers = client.containers.list(all=True)
-    except Exception:
-        return usage_count, usage_refs
-
-    for container in containers:
-        attrs = getattr(container, "attrs", None) or {}
-        image_id = str(attrs.get("Image") or getattr(getattr(container, "image", None), "id", "") or "").strip()
-        if not image_id:
-            continue
-
-        usage_count[image_id] = usage_count.get(image_id, 0) + 1
-        usage_refs.setdefault(image_id, []).append(
-            {
-                "id": str(getattr(container, "id", "") or ""),
-                "name": _normalize_container_name(container),
-                "status": str((attrs.get("State") or {}).get("Status") or getattr(container, "status", "") or ""),
-            }
-        )
-
-    return usage_count, usage_refs
 
 
 def _collect_managed_image_usage(client) -> Tuple[Dict[str, int], Dict[str, List[Dict[str, Any]]]]:
@@ -271,7 +193,7 @@ def list_images() -> Dict[str, Any]:
             "scope": "managed",
         }
     except docker.errors.APIError as exc:
-        raise ContainerServiceError(f"获取受管镜像列表失败: {_docker_error_message(exc)}", 500)
+        raise ContainerServiceError(f"获取受管镜像列表失败: {extract_docker_error_message(exc)}", 500)
 
 
 def get_image_detail(image_ref: str) -> Dict[str, Any]:
@@ -313,7 +235,7 @@ def get_image_detail(image_ref: str) -> Dict[str, Any]:
                 unregister_managed_image(resolved_id)
         raise ContainerServiceError(f"未找到指定受管镜像: {ref}", 404)
     except docker.errors.APIError as exc:
-        raise ContainerServiceError(f"获取受管镜像详情失败: {_docker_error_message(exc)}", 500)
+        raise ContainerServiceError(f"获取受管镜像详情失败: {extract_docker_error_message(exc)}", 500)
 
 
 def pull_image(image: str, app_config: AppConfig = None) -> Dict[str, Any]:
@@ -324,7 +246,7 @@ def pull_image(image: str, app_config: AppConfig = None) -> Dict[str, Any]:
     if not requested_image:
         raise ValidationError("镜像名称不能为空")
 
-    resolved_image = _resolve_image_reference(requested_image, getattr(app_config, "IMAGE_SOURCE", None))
+    resolved_image = resolve_image_reference(requested_image, getattr(app_config, "IMAGE_SOURCE", None))
     client = _ensure_client()
 
     try:
@@ -351,7 +273,7 @@ def pull_image(image: str, app_config: AppConfig = None) -> Dict[str, Any]:
     except docker.errors.ImageNotFound:
         _raise_pull_error("not found", requested_image, resolved_image, 404)
     except docker.errors.APIError as exc:
-        _raise_pull_error(_docker_error_message(exc), requested_image, resolved_image, 500)
+        _raise_pull_error(extract_docker_error_message(exc), requested_image, resolved_image, 500)
 
 
 def pull_image_streaming(image: str, app_config: AppConfig = None):
@@ -363,8 +285,8 @@ def pull_image_streaming(image: str, app_config: AppConfig = None):
     if not requested_image:
         raise ValidationError("镜像名称不能为空")
 
-    resolved_image = _resolve_image_reference(requested_image, getattr(app_config, "IMAGE_SOURCE", None))
-    repository, tag = _split_image_reference(resolved_image)
+    resolved_image = resolve_image_reference(requested_image, getattr(app_config, "IMAGE_SOURCE", None))
+    repository, tag = split_image_reference(resolved_image)
     if not repository:
         raise ValidationError("镜像名称不能为空")
 
@@ -380,7 +302,7 @@ def pull_image_streaming(image: str, app_config: AppConfig = None):
                 message = str(chunk.get("error") or "").strip()
                 _raise_pull_error(message or "未知错误", requested_image, resolved_image, 500)
 
-            line = _format_pull_progress_event(chunk)
+            line = format_pull_progress_event(chunk)
             if line:
                 yield line
 
@@ -411,7 +333,7 @@ def pull_image_streaming(image: str, app_config: AppConfig = None):
     except ContainerServiceError:
         raise
     except docker.errors.APIError as exc:
-        _raise_pull_error(_docker_error_message(exc), requested_image, resolved_image, 500)
+        _raise_pull_error(extract_docker_error_message(exc), requested_image, resolved_image, 500)
 
 
 def delete_image(image_ref: str, force: bool = False) -> Dict[str, Any]:
@@ -446,7 +368,7 @@ def delete_image(image_ref: str, force: bool = False) -> Dict[str, Any]:
     except docker.errors.APIError as exc:
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         code = 409 if status_code == 409 else 500
-        raise ContainerServiceError(f"删除受管镜像失败: {_docker_error_message(exc)}", code)
+        raise ContainerServiceError(f"删除受管镜像失败: {extract_docker_error_message(exc)}", code)
 
 
 def prune_images() -> Dict[str, Any]:
@@ -485,4 +407,4 @@ def prune_images() -> Dict[str, Any]:
             "scope": "managed",
         }
     except docker.errors.APIError as exc:
-        raise ContainerServiceError(f"清理受管悬空镜像失败: {_docker_error_message(exc)}", 500)
+        raise ContainerServiceError(f"清理受管悬空镜像失败: {extract_docker_error_message(exc)}", 500)

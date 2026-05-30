@@ -184,6 +184,16 @@ def _extract_port_mappings(data: Dict[str, Any]) -> List[Tuple[str, int]]:
     return mappings
 
 
+def _extract_env(data: Dict[str, Any]) -> Dict[str, str]:
+    """提取并规范化全局环境变量。"""
+    raw = data.get("env", {})
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ValidationError("env 必须是对象")
+    return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+
+
 def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
     """提取并验证容器启动参数
     
@@ -245,7 +255,7 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
         "max_time": data.get("max_time", app_config.MAX_TIME),
         "tag": data.get("tag"),
         "uid": uid,
-        "env": data.get("env", {}),
+        "env": _extract_env(data),
         "meta": data.get("_meta", {}),
         "resource_limits": resource_limits,
         "port_mappings": port_mappings,
