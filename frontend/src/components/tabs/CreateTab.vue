@@ -495,14 +495,14 @@ onMounted(async () => {
             </div>
             <div class="mt-2">
               <KeyValueLinesEditor
-                v-model="form.labelsText"
+                v-model="form.envText"
                 :rows="3"
-                placeholder="例如&#10;env=test&#10;owner=lab"
-                @validate="validateLabelFormat"
+                placeholder="例如&#10;DEBUG=true&#10;NODE_ENV=production"
+                @validate="validateEnvFormat"
               >
                 <template #header>
                   <div>
-                    <p class="mt-1 text-xs text-slate-500">每行一个标签，格式 key=value。系统标签会自动补齐，不需要手填。</p>
+                    <p class="mt-1 text-xs text-slate-500">每行一个环境变量，格式 key=value（也支持 key: value）。</p>
                   </div>
                 </template>
               </KeyValueLinesEditor>
