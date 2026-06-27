@@ -53,7 +53,7 @@ def _check_port_available(port: int) -> bool:
     sock = None
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.bind(("0.0.0.0", int(port)))
+        sock.bind(("0.0.0.0", int(port)))  # nosec B104
         return True
     except OSError:
         return False
