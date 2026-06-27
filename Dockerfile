@@ -1,6 +1,9 @@
 # syntax=docker/dockerfile:1
 
-FROM docker.1ms.run/node:20-alpine AS frontend
+ARG NODE_IMAGE=node:20-alpine
+ARG PYTHON_IMAGE=python:3.11-slim
+
+FROM ${NODE_IMAGE} AS frontend
 WORKDIR /build/frontend
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 COPY frontend/package.json ./
@@ -9,7 +12,7 @@ RUN npm config set registry https://registry.npmmirror.com \
 COPY frontend/ ./
 RUN npm run build
 
-FROM docker.1ms.run/python:3.11-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 WORKDIR /app
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
