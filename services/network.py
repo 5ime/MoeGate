@@ -1,7 +1,7 @@
 """受管网络服务。"""
 import ipaddress
 import logging
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 import docker
 from docker.types import IPAMConfig, IPAMPool
@@ -131,6 +131,23 @@ def _build_network_summary(network) -> Dict[str, Any]:
         "attached_container_count": len(attached_ids),
         "is_in_use": len(attached_ids) > 0,
     }
+
+
+_RESERVED_NETWORK_NAMES = frozenset({"host", "none", "bridge", "default", "nat"})
+
+
+def assert_managed_network(network: str) -> str:
+    """校验 network 为 MoeGate 受管网络，返回规范网络名。"""
+    name = str(network or "").strip()
+    if not name:
+        raise ValidationError("network 不能为空")
+    if name.lower() in _RESERVED_NETWORK_NAMES:
+        raise ValidationError(f"network 不允许使用保留名称: {name}")
+    try:
+        managed = _get_managed_network(name)
+    except ContainerNotFoundError as exc:
+        raise ValidationError(f"network 不存在或非受管网络: {name}") from exc
+    return str(getattr(managed, "name", name) or name)
 
 
 def _get_managed_network(identifier: str):

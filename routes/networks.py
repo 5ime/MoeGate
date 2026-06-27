@@ -1,8 +1,7 @@
 """受管网络路由。"""
 from flask import Blueprint, g
 
-from core.exceptions import ContainerServiceError
-from core.responses import exception, success
+from core.route_helpers import handle_service_call
 from middleware import log_request, rate_limit, require_api_key, validate_json
 from services.network import (
     create_managed_network,
@@ -13,14 +12,6 @@ from services.network import (
 )
 
 bp = Blueprint("networks", __name__, url_prefix="/api/v1")
-
-
-def handle_service_call(func, success_message: str = "操作成功", success_code: int = 200, *args, **kwargs):
-    try:
-        data = func(*args, **kwargs)
-        return success(data, success_message, code=success_code)
-    except ContainerServiceError as exc:
-        return exception(exc)
 
 
 @bp.route("/networks", methods=["GET"])

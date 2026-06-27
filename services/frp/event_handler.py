@@ -1,183 +1,283 @@
 """FRP事件处理器"""
 import logging
-import time
-from typing import Dict, Any, Optional
+from dataclasses import dataclass
+from typing import Dict, Any, Optional, List, Tuple, Set
+
 from config import config
-from utils.container_manager import get_container_manager
 from services.frp.parser import list_proxies
-from services.frp.proxy_manager import add_proxy_config
-from services.frp.utils import build_proxy_config
-from services.frp.exceptions import FRPConfigError
+from services.frp.proxy_manager import add_proxy_config, add_proxy_configs_batch
+from services.frp.utils import build_proxy_config, build_proxy_name
+from services.frp.exceptions import FRPPortUnavailableError
 
 logger = logging.getLogger(__name__)
 
-# FRP配置重试参数
 FRP_CONFIG_MAX_RETRIES = 3
-FRP_CONFIG_RETRY_DELAY = 1.0  # 秒
+
+
+@dataclass
+class _ProxyBuildRequest:
+    proxy_name: str
+    container_name: str
+    container_uuid: str
+    local_port: int
+    user_type: Optional[str]
+    compose_service: Optional[str]
+    compose_project_id: Optional[str]
 
 
 def _find_available_remote_port(
-    preferred_port: int, 
-    container_name: str,
+    preferred_port: int,
+    proxy_name: str,
     min_port: int = None,
-    max_port: int = None
+    max_port: int = None,
+    *,
+    reserved_remote_ports: Optional[Set[int]] = None,
 ) -> int:
-    """查找可用的远程端口
-    
-    如果首选端口被占用，尝试查找其他可用端口。
-    
-    Args:
-        preferred_port: 首选端口
-        container_name: 容器名称
-        min_port: 最小端口号（可选）
-        max_port: 最大端口号（可选）
-        
-    Returns:
-        int: 可用的远程端口号
-    """
+    """查找可用的远程端口。"""
     existing_proxies = list_proxies()
     used_ports = {
-        proxy.get('remotePort') 
-        for proxy in existing_proxies 
-        if proxy.get('remotePort') and proxy.get('name') != container_name
+        proxy.get('remotePort')
+        for proxy in existing_proxies
+        if proxy.get('remotePort') and proxy.get('name') != proxy_name
     }
-    
-    # 如果首选端口可用，直接返回
+    if reserved_remote_ports:
+        used_ports.update(reserved_remote_ports)
+
     if preferred_port not in used_ports:
+        if reserved_remote_ports is not None:
+            reserved_remote_ports.add(preferred_port)
         return preferred_port
-    
-    # 如果首选端口被占用，尝试查找其他端口
+
     logger.warning(
-        "端口 %s 已被其他代理使用，"
-        "尝试为容器 %s 查找其他可用端口",
-        preferred_port, container_name
+        "端口 %s 已被其他代理使用，尝试为代理 %s 查找其他可用端口",
+        preferred_port,
+        proxy_name,
     )
-    
-    # 如果提供了端口范围，在范围内查找
+
     if min_port is not None and max_port is not None:
         for port in range(min_port, max_port + 1):
             if port not in used_ports and port != preferred_port:
-                logger.info("为容器 %s 选择备用端口: %s", container_name, port)
+                logger.info("为代理 %s 选择备用端口: %s", proxy_name, port)
+                if reserved_remote_ports is not None:
+                    reserved_remote_ports.add(port)
                 return port
-    
-    # 如果没有找到备用端口，仍然使用首选端口（但会记录警告）
-    logger.warning(
-        "未找到备用端口，容器 %s 将使用可能冲突的端口 %s",
-        container_name, preferred_port
-    )
-    return preferred_port
+        raise FRPPortUnavailableError(proxy_name, min_port, max_port)
+
+    raise FRPPortUnavailableError(proxy_name, preferred_port, preferred_port)
 
 
-def create_config(info: Dict[str, Any]) -> None:
-    """为容器创建并更新FRP配置（带重试机制）
-    
-    如果FRP配置创建失败，会进行重试。即使最终失败，也不会影响容器创建。
-    
-    Args:
-        info: 容器信息字典，包含container_name和ports
-    """
+def _normalize_port_items(ports: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    if not ports:
+        return []
+    return list(ports.items())
+
+
+def _resolve_user_type_for_port(user_type: Optional[str], *, primary: bool) -> Optional[str]:
+    """多端口时仅首个代理可保留 HTTP/域名模式，其余强制 TCP。"""
+    if primary or not user_type:
+        return user_type
+    normalized = str(user_type).strip().lower()
+    if normalized == "http":
+        return "tcp"
+    return user_type
+
+
+def _collect_proxy_requests(info: Dict[str, Any]) -> List[_ProxyBuildRequest]:
+    """从 container.created 事件载荷收集待创建的代理请求。"""
     container_name = info.get("container_name")
     if not container_name:
-        logger.error("无效的容器名称，跳过FRP配置")
+        return []
+
+    port_items = _normalize_port_items(info.get("ports") or {})
+    if not port_items:
+        compose_service = info.get("compose_service")
+        if compose_service:
+            logger.debug(
+                "Compose 服务 %s/%s 无端口映射，跳过 FRP",
+                info.get("compose_project_id"),
+                compose_service,
+            )
+        else:
+            logger.debug("容器 %s 无端口映射，跳过 FRP", container_name)
+        return []
+
+    user_type = info.get("type")
+    container_uuid = info.get("container_uuid") or container_name
+    compose_service = info.get("compose_service")
+    compose_project_id = info.get("compose_project_id")
+    requests: List[_ProxyBuildRequest] = []
+
+    for index, (port_key, local_port) in enumerate(port_items):
+        try:
+            local_port_int = int(local_port)
+        except (ValueError, TypeError):
+            logger.error("容器 %s 端口 %s 无效: %s，跳过该映射", container_name, port_key, local_port)
+            continue
+
+        requests.append(
+            _ProxyBuildRequest(
+                proxy_name=build_proxy_name(container_name, port_key, primary=(index == 0)),
+                container_name=container_name,
+                container_uuid=container_uuid,
+                local_port=local_port_int,
+                user_type=_resolve_user_type_for_port(user_type, primary=(index == 0)),
+                compose_service=compose_service,
+                compose_project_id=compose_project_id,
+            )
+        )
+    return requests
+
+
+def _build_proxy_configs(
+    requests: List[_ProxyBuildRequest],
+    *,
+    reserved_remote_ports: Optional[Set[int]] = None,
+) -> Tuple[List[Dict[str, Any]], int]:
+    """构建代理配置列表，返回 (configs, failed_count)。"""
+    min_port = config.MIN_PORT if hasattr(config, 'MIN_PORT') else None
+    max_port = config.MAX_PORT if hasattr(config, 'MAX_PORT') else None
+    proxy_configs: List[Dict[str, Any]] = []
+    failed = 0
+
+    for req in requests:
+        try:
+            remote_port = _find_available_remote_port(
+                req.local_port,
+                req.proxy_name,
+                min_port=min_port,
+                max_port=max_port,
+                reserved_remote_ports=reserved_remote_ports,
+            )
+            proxy_config, _type_source = build_proxy_config(
+                req.container_name,
+                req.local_port,
+                remote_port,
+                req.user_type,
+                req.container_uuid,
+                proxy_name=req.proxy_name,
+                compose_service=req.compose_service,
+                compose_project_id=req.compose_project_id,
+            )
+            proxy_configs.append(proxy_config)
+        except FRPPortUnavailableError as exc:
+            failed += 1
+            logger.error("%s，跳过代理 %s", exc.message, req.proxy_name)
+        except Exception as exc:
+            failed += 1
+            logger.error("构建代理 %s 失败: %s", req.proxy_name, exc)
+
+    return proxy_configs, failed
+
+
+def create_configs_batch(infos: List[Dict[str, Any]]) -> None:
+    """为多个容器批量创建 FRP 代理（Compose 多 service 场景）。"""
+    valid_infos = [info for info in (infos or []) if isinstance(info, dict)]
+    if not valid_infos:
         return
 
-    ports = info.get("ports", {})
-    logger.debug("收到 container.created 事件，容器: %s, 端口: %s", container_name, ports)
-    
-    # 获取本地端口
-    local_port = None
-    if ports:
-        first_port_key = list(ports.keys())[0]
-        local_port = ports[first_port_key]
-        logger.debug("容器 %s 使用端口 %s -> %s", container_name, first_port_key, local_port)
-    else:
-        logger.error("容器 %s 没有映射任何端口，跳过FRP配置", container_name)
+    all_requests: List[_ProxyBuildRequest] = []
+    for info in valid_infos:
+        all_requests.extend(_collect_proxy_requests(info))
+
+    if not all_requests:
+        logger.debug("批量 FRP 注册：无有效端口映射")
         return
 
-    # 验证端口号
-    try:
-        local_port_int = int(local_port)
-    except (ValueError, TypeError):
-        logger.error("无效的端口号: %s，跳过FRP配置", local_port)
+    reserved_remote_ports: Set[int] = set()
+    proxy_configs, build_failed = _build_proxy_configs(
+        all_requests,
+        reserved_remote_ports=reserved_remote_ports,
+    )
+
+    if not proxy_configs:
+        logger.error("批量 FRP 注册失败：未能构建任何代理配置")
         return
-    
-    # 查找可用的远程端口（避免冲突）
-    try:
-        remote_port = _find_available_remote_port(
-            local_port_int,
-            container_name,
-            min_port=config.MIN_PORT if hasattr(config, 'MIN_PORT') else None,
-            max_port=config.MAX_PORT if hasattr(config, 'MAX_PORT') else None
-        )
-    except Exception as e:
-        logger.warning("查找可用端口时发生错误: %s，使用首选端口 %s", e, local_port_int)
-        remote_port = local_port_int
-    
-    # 构建代理配置
-    try:
-        user_type = info.get("type")
-        container_uuid = info.get("container_uuid") or container_name
-        proxy_config, type_source = build_proxy_config(
-            container_name, 
-            local_port_int, 
-            remote_port, 
-            user_type, 
-            container_uuid
-        )
-        logger.debug("构建的FRP代理配置: %s, 类型来源: %s", proxy_config, type_source)
-    except Exception as e:
-        logger.error("构建FRP代理配置失败: %s，跳过FRP配置", e)
+
+    use_batch = len(valid_infos) > 1 or len(proxy_configs) > 1
+    if use_batch:
+        added, msg = add_proxy_configs_batch(proxy_configs)
+        if added <= 0:
+            logger.error("批量 FRP 注册失败: %s", msg)
+            return
+        if added < len(proxy_configs):
+            logger.warning("批量 FRP 注册部分成功 (%d/%d): %s", added, len(proxy_configs), msg)
+        else:
+            logger.info(
+                "Compose/多端口 FRP 批量注册完成: %d 个代理（%d 个容器）",
+                added,
+                len(valid_infos),
+            )
+        if build_failed:
+            logger.warning("批量 FRP 注册另有 %d 个代理构建失败", build_failed)
         return
-    
-    # 重试创建FRP配置
+
+    # 单容器单代理：沿用带重试的单条写入
+    _persist_single_proxy_with_retry(proxy_configs[0])
+
+
+def _persist_single_proxy_with_retry(proxy_config: Dict[str, Any]) -> bool:
+    import time
+    from services.frp.exceptions import FRPConfigError
+
+    proxy_name = proxy_config.get("name")
     last_error = None
     for attempt in range(1, FRP_CONFIG_MAX_RETRIES + 1):
         try:
             success, msg = add_proxy_config(proxy_config)
             if success:
-                proxy_type = proxy_config['type'].upper()
-                if proxy_config.get('customDomains'):
-                    domain = proxy_config['customDomains'][0]
-                    access_url = f"http://{domain}"
-                    if config.FRP_VHOST_HTTP_PORT and config.FRP_VHOST_HTTP_PORT != 80:
-                        access_url += f":{config.FRP_VHOST_HTTP_PORT}"
-                    logger.info(
-                        "成功为容器 %s 创建FRP配置 (%s, 域名: %s, 访问地址: %s)",
-                        container_name, proxy_type, domain, access_url
-                    )
-                else:
-                    access_url = f"{config.FRP_SERVER_ADDR}:{remote_port}"
-                    logger.info(
-                        "成功为容器 %s 创建FRP配置 (%s, 端口: %s -> %s, 访问地址: %s)",
-                        container_name, proxy_type, local_port_int, remote_port, access_url
-                    )
-                return  # 成功，退出
-            else:
-                last_error = msg
-                logger.warning(
-                    "创建FRP配置失败 (尝试 %s/%s): %s",
-                    attempt, FRP_CONFIG_MAX_RETRIES, msg
-                )
-        except FRPConfigError as e:
-            last_error = e.message
+                _log_proxy_success(proxy_config)
+                return True
+            last_error = msg
             logger.warning(
-                "创建FRP配置时发生FRP配置错误 (尝试 %s/%s): %s",
-                attempt, FRP_CONFIG_MAX_RETRIES, e.message
+                "创建代理 %s 的 FRP 配置失败 (尝试 %s/%s): %s",
+                proxy_name, attempt, FRP_CONFIG_MAX_RETRIES, msg,
             )
-        except Exception as e:
-            last_error = str(e)
+        except FRPConfigError as exc:
+            last_error = exc.message
             logger.warning(
-                    "创建FRP配置时发生未知错误 (尝试 %s/%s): %s",
-                    attempt, FRP_CONFIG_MAX_RETRIES, e
-                )
-        
-        # 如果不是最后一次尝试，等待后重试
+                "创建代理 %s 时发生 FRP 配置错误 (尝试 %s/%s): %s",
+                proxy_name, attempt, FRP_CONFIG_MAX_RETRIES, exc.message,
+            )
+        except Exception as exc:
+            last_error = str(exc)
+            logger.warning(
+                "创建代理 %s 时发生未知错误 (尝试 %s/%s): %s",
+                proxy_name, attempt, FRP_CONFIG_MAX_RETRIES, exc,
+            )
         if attempt < FRP_CONFIG_MAX_RETRIES:
-            time.sleep(FRP_CONFIG_RETRY_DELAY * attempt)  # 指数退避
-    
-    # 所有重试都失败，记录错误但不抛出异常（不影响容器创建）
-    logger.error(
-        "为容器 %s 创建FRP配置失败，已重试 %s 次。最后错误: %s。容器已创建，但FRP配置未生效，可能需要手动配置。",
-        container_name, FRP_CONFIG_MAX_RETRIES, last_error
-    )
+            time.sleep(1.0 * attempt)
 
+    logger.error(
+        "为代理 %s 创建 FRP 配置失败，已重试 %s 次。最后错误: %s",
+        proxy_name, FRP_CONFIG_MAX_RETRIES, last_error,
+    )
+    return False
+
+
+def _log_proxy_success(proxy_config: Dict[str, Any]) -> None:
+    proxy_name = proxy_config.get("name")
+    proxy_type = str(proxy_config.get("type") or "tcp").upper()
+    local_port = proxy_config.get("localPort")
+    remote_port = proxy_config.get("remotePort")
+    if proxy_config.get("customDomains"):
+        domain = proxy_config["customDomains"][0]
+        access_url = f"http://{domain}"
+        if config.FRP_VHOST_HTTP_PORT and config.FRP_VHOST_HTTP_PORT != 80:
+            access_url += f":{config.FRP_VHOST_HTTP_PORT}"
+        logger.info(
+            "成功为代理 %s 创建 FRP 配置 (%s, 域名: %s, 访问地址: %s)",
+            proxy_name, proxy_type, domain, access_url,
+        )
+    else:
+        access_url = f"{config.FRP_SERVER_ADDR}:{remote_port}"
+        logger.info(
+            "成功为代理 %s 创建 FRP 配置 (%s, 端口: %s -> %s, 访问地址: %s)",
+            proxy_name, proxy_type, local_port, remote_port, access_url,
+        )
+
+
+def handle_container_created(info: Dict[str, Any]) -> None:
+    """container.created 事件处理。"""
+    if not isinstance(info, dict):
+        return
+    create_configs_batch([info])

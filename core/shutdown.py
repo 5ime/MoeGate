@@ -28,29 +28,41 @@ def graceful_shutdown():
 
     logger.info("开始关闭...")
 
-    from workers.performance import stop_performance_monitoring
-    stop_performance_monitoring()
-
     try:
         from utils.container_manager import get_container_manager
         manager = get_container_manager()
         try:
+            manager.stop_reconcile_worker()
+        except Exception as e:
+            logger.debug("停止 reconcile 线程时出现问题: %s", e)
+        try:
             manager.cancel_all_timers()
         except Exception as e:
             logger.debug("取消定时器时出现问题: %s", e)
-        container_ids = manager.get_container_ids()
 
-        logger.info("正在清理 %d 个容器...", len(container_ids))
-        from utils.destroy import destroy_container
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=min(8, len(container_ids) or 1), thread_name_prefix="shutdown") as pool:
-            futures = {pool.submit(destroy_container, cid): cid for cid in container_ids}
-            for future in as_completed(futures, timeout=60):
-                cid = futures[future]
-                try:
-                    future.result()
-                except Exception as e:
-                    logger.error("清理容器 %s 失败: %s", cid, e)
+        if not config.SHUTDOWN_DESTROY_CONTAINERS:
+            logger.info(
+                "SHUTDOWN_DESTROY_CONTAINERS=false，保留受管容器（仅取消到期定时器）"
+            )
+        else:
+            container_ids = [
+                cid for cid in manager.get_container_ids()
+                if not manager.is_reserved_id(cid)
+            ]
+            logger.info("正在清理 %d 个容器...", len(container_ids))
+            from utils.destroy import destroy_container
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            with ThreadPoolExecutor(
+                max_workers=min(8, len(container_ids) or 1),
+                thread_name_prefix="shutdown",
+            ) as pool:
+                futures = {pool.submit(destroy_container, cid): cid for cid in container_ids}
+                for future in as_completed(futures, timeout=60):
+                    cid = futures[future]
+                    try:
+                        future.result()
+                    except Exception as e:
+                        logger.error("清理容器 %s 失败: %s", cid, e)
     except Exception as e:
         logger.error("清理容器时发生错误: %s", e)
 

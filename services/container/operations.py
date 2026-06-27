@@ -2,6 +2,9 @@
 import logging
 from typing import Dict, Any
 from datetime import datetime
+
+from docker.errors import APIError, NotFound
+
 from config.settings import config as default_config, AppConfig
 from core.exceptions import (
     ValidationError,
@@ -120,8 +123,12 @@ def _resolve_managed_container(container_id: str):
                 labels = container.attrs.get('Config', {}).get('Labels') or {}
                 if labels.get('moegate.managed') != 'true':
                     return None
-                manager.add_container(container.id, container)
-            except Exception:
+                manager.add_container(container.id, container, consume_reservation=False)
+                manager.ensure_lifecycle_state(container)
+            except NotFound:
+                container = None
+            except APIError as exc:
+                logger.warning("Docker API 错误，无法解析容器 %s: %s", container_id, exc)
                 container = None
 
     return container
@@ -289,8 +296,7 @@ def stop_any(data: Dict[str, Any]) -> Dict[str, Any]:
         result = stop_container({"container_id": entity_id})
         return {"kind": "container", **result}
 
-    result = _build_absent_compose_project_destroy_result(entity_id)
-    return {"kind": "compose_project", **result}
+    raise ManagedEntityNotFoundError(entity_id)
 
 
 def restart_any(data: Dict[str, Any]) -> Dict[str, Any]:
@@ -415,7 +421,7 @@ def restart_compose_project(data: Dict[str, Any]) -> Dict[str, Any]:
     manager = get_container_manager()
     for container in containers:
         container.restart()
-        manager.add_container(container.id, container)
+        manager.add_container(container.id, container, consume_reservation=False)
         restarted_ids.append(container.id)
 
     return {
@@ -442,7 +448,8 @@ def renew_compose_project(data: Dict[str, Any], app_config: AppConfig = None) ->
     manager = get_container_manager()
     pending_counts = {}
     for container in containers:
-        manager.add_container(container.id, container)
+        manager.add_container(container.id, container, consume_reservation=False)
+        manager.ensure_lifecycle_state(container)
         current_count = manager.get_renew_count(container.id)
         if current_count + 1 > max_renew_times:
             raise MaxRenewTimesExceededError(container.id, current_count, max_renew_times)
@@ -496,11 +503,8 @@ def renew_task(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, 
     if container is None:
         raise ContainerNotFoundError(container_id)
 
-    # 调用续期方法，如果超过上限会抛出 MaxRenewTimesExceededError
     manager = get_container_manager()
     manager.renew(container_id, max_time, max_renew_times)
-    
-    # 获取续期计数用于返回
     current_count = manager.get_renew_count(container_id)
     
     logger.info("容器 %s 续期成功，将在 %s 秒后销毁，续期次数: %s/%s", container_id, max_time, current_count, max_renew_times)

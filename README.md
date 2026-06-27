@@ -2,7 +2,7 @@
 
 轻量级 Docker 容器管理网关，专为 CTF 动态靶机、在线实验室与临时演示环境设计。支持 Dockerfile、Docker Compose 与镜像快速部署，提供自动销毁、FRP 穿透、资源限制与 WebUI 管理能力。
 
-![Python](https://img.shields.io/badge/Python-3.8%2B-blue) ![Flask](https://img.shields.io/badge/Flask-2.x-black) ![Docker](https://img.shields.io/badge/Docker-Engine-2496ED)
+![Python](https://img.shields.io/badge/Python-3.11-blue) ![Flask](https://img.shields.io/badge/Flask-3.1-black) ![Docker](https://img.shields.io/badge/Docker-Engine-2496ED)
 
 ![示例截图](https://github.com/user-attachments/assets/b8f64b98-7ca0-4417-aef6-3bf50b1b7f66)
 
@@ -28,27 +28,32 @@
 ### 运维能力
 
 - SSE 流式日志：构建和拉取镜像过程实时输出
-- 告警通知：Webhook / 飞书机器人卡片消息
+- 告警 Webhook：支持通用 JSON 与飞书机器人卡片（`POST /api/v1/alerts/test` 手动测试）
 - 受管镜像：自动登记、悬空清理、引用关系约束
 
 ### 安全与隔离
 
-- API Key 认证、IP 限流、路径白名单、CORS、请求体校验
+- 双模式 API 认证：脚本/API 使用 `X-API-Key` Header；WebUI 使用 Cookie Session（密钥不进入 JavaScript）
+- Cookie 模式下变更类请求启用 CSRF 防护（Double-Submit Cookie）
+- IP 限流、路径白名单、CORS、请求体校验；可选 WebUI Basic 认证
 - 容器隔离：只管理 MoeGate 创建的容器（`moegate.managed=true`），不影响宿主机
 
 ### WebUI
 
 - Vue 3 + Tailwind CSS，容器/镜像/网络/FRP/系统设置一站式管理
+- 登录后通过 HttpOnly Cookie 调用 API，无需在浏览器存储密钥
 
 ## 快速开始
 
 ```bash
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 cp env.example .env   # 编辑 .env
 python app.py
 ```
 
-启动后访问 `http://localhost:8080`。环境要求、生产部署与前端开发见 [docs/deploy.md](docs/deploy.md)。
+启动后访问 `http://localhost:8080`。环境要求：**Python 3.11**（与 Docker 镜像一致），建议使用虚拟环境隔离依赖，详见 [docs/deploy.md](docs/deploy.md)。
 
 ## 项目结构
 
@@ -65,16 +70,21 @@ services/
   image.py              # 受管镜像服务
   network.py            # 受管网络服务
 utils/                  # 销毁任务、端口工具、路径校验、告警、镜像登记、Docker 镜像解析
-workers/                # 性能监控
 frontend/               # Vue 3 WebUI 源码
 static/                 # WebUI 构建产物
+deploy/compose/         # Docker Compose 叠加示例（FRP、Socket Proxy）
 ```
 
 ## API
 
 完整 API 文档见 [docs/api.md](docs/api.md)。
 
-所有接口需要 `X-API-Key` 请求头。主要接口：
+`/api/v1/*` 接口支持两种认证方式（二选一）：
+
+- **Header**：请求头 `X-API-Key`（适合 curl、自动化脚本）
+- **Cookie**：WebUI 登录后写入 HttpOnly Session Cookie（生产推荐）
+
+主要接口：
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
@@ -109,7 +119,9 @@ services:
 - 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
 - **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag
 
-自定义变量名同样生效，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 可配合 compose 中的 `${DEDE_FLAG}` 使用。更多示例见 [docs/compose.md](docs/compose.md)。
+自定义变量名同样生效，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 可配合 compose 中的 `${DEDE_FLAG}` 使用。
+
+> **注意**：MoeGate 使用简化 Compose 子集，支持 `image`/`build`/`ports`/`command`/`environment`/`networks`、**bind mount `volumes`**、`privileged`（`COMPOSE_POLICY=ctf` 时）等；**named volume**、`network_mode: host` 等不支持。详见 [docs/compose.md](docs/compose.md)。
 
 ## 文档
 
@@ -117,8 +129,10 @@ services:
 |------|------|
 | [docs/api.md](docs/api.md) | 完整 API 参考 |
 | [docs/deploy.md](docs/deploy.md) | 部署、配置与前端开发 |
+| [docs/SECURITY.md](docs/SECURITY.md) | 安全说明与威胁模型 |
 | [docs/frp.md](docs/frp.md) | FRP 穿透配置 |
 | [docs/compose.md](docs/compose.md) | Compose 变量替换机制 |
+| [deploy/compose/README.md](deploy/compose/README.md) | Docker Compose 叠加示例（Socket Proxy、FRP） |
 
 ## FAQ
 
@@ -132,4 +146,8 @@ services:
 
 **镜像删除失败？** 可能仍被容器引用，或同一镜像有多个 tag 需要 `force=true`。
 
-**设置重启后丢失？** `ALLOW_RUNTIME_CONFIG_WRITE=False`（默认）时，API 修改仅在内存生效，不写入 `.env`。
+**设置重启后丢失？** 通过 API 修改的设置仅在当前进程内存生效，重启后恢复为 `.env` / 环境变量中的启动配置。
+
+**续期/到期时间存在哪里？** 创建时在容器 labels 写入初始值；因 Docker labels 创建后不可变，续期与到期变更会同步写入 `ALLOWED_BASE_DIR/.moegate/lifecycle.json`，以便进程重启后恢复定时器。删除容器时会清理对应记录。
+
+**告警会自动推送吗？** 当前版本仅支持配置 Webhook 并通过 `POST /api/v1/alerts/test` 手动测试；飞书机器人 URL 会自动适配卡片格式。容器异常等资源告警尚未自动触发。

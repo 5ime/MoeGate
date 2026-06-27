@@ -336,8 +336,8 @@ def destroy_container(container_id: str):
 
             if config.ENABLE_FRP and container_name:
                 try:
-                    from services.frp import delete_proxy_config
-                    ok, msg = delete_proxy_config(container_name)
+                    from services.frp import delete_container_proxy_configs
+                    ok, msg = delete_container_proxy_configs(container_name)
                     if ok:
                         log_func("已删除容器 %s 的FRP代理配置", container_name)
                     else:

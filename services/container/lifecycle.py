@@ -1,9 +1,9 @@
 """容器生命周期管理"""
 import os
-import time
 import uuid
 import logging
 import re
+import yaml
 from typing import Dict, Any, Optional, List, Tuple
 from config.settings import config as default_config, AppConfig
 from core.exceptions import (
@@ -19,10 +19,12 @@ from utils.path_validator import (
     validate_path,
 )
 from utils.container_manager import get_container_manager
-from core.events import get_event_bus
 from services.container.builder import (
     start_container_from_source,
     start_container_from_source_streaming,
+)
+from services.network import assert_managed_network
+from services.container.single_container import (
     start_from_image,
     start_from_image_streaming,
 )
@@ -111,6 +113,13 @@ def _extract_resource_limits(data: Dict[str, Any]) -> Dict[str, Any]:
     return resource_limits
 
 
+def _validate_host_port_range(host_port: int, min_port: int, max_port: int) -> None:
+    if host_port < min_port or host_port > max_port:
+        raise ValidationError(
+            f"host 端口 {host_port} 必须在 {min_port}-{max_port} 范围内"
+        )
+
+
 def _extract_port_mappings(data: Dict[str, Any]) -> List[Tuple[str, int]]:
     """解析显式端口映射。
 
@@ -184,14 +193,47 @@ def _extract_port_mappings(data: Dict[str, Any]) -> List[Tuple[str, int]]:
     return mappings
 
 
-def _extract_env(data: Dict[str, Any]) -> Dict[str, str]:
+def _extract_env(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, str]:
     """提取并规范化全局环境变量。"""
+    if app_config is None:
+        app_config = default_config
+
     raw = data.get("env", {})
     if raw is None:
         return {}
     if not isinstance(raw, dict):
         raise ValidationError("env 必须是对象")
-    return {str(key): "" if value is None else str(value) for key, value in raw.items()}
+
+    max_keys = int(getattr(app_config, "MAX_CONTAINER_ENV_KEYS", 64) or 64)
+    max_value_len = int(getattr(app_config, "MAX_CONTAINER_ENV_VALUE_LEN", 4096) or 4096)
+    if len(raw) > max_keys:
+        raise ValidationError(f"env 键数量不能超过 {max_keys}")
+
+    normalized: Dict[str, str] = {}
+    for key, value in raw.items():
+        key_text = str(key)
+        if len(key_text) > 256:
+            raise ValidationError("env 键过长")
+        value_text = "" if value is None else str(value)
+        if len(value_text) > max_value_len:
+            raise ValidationError(f"env 值长度不能超过 {max_value_len}")
+        normalized[key_text] = value_text
+    return normalized
+
+
+def _validate_max_time(raw: object, app_config: AppConfig) -> int:
+    """校验容器存活时间，限制在配置允许范围内。"""
+    if raw is None:
+        return int(app_config.MAX_TIME)
+    try:
+        max_time = int(raw)
+    except (TypeError, ValueError):
+        raise ValidationError("max_time 必须是整数")
+    if max_time <= 0:
+        raise ValidationError("max_time 必须大于 0")
+    if max_time > int(app_config.MAX_TIME):
+        raise ValidationError(f"max_time 不能超过 {app_config.MAX_TIME}")
+    return max_time
 
 
 def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
@@ -226,17 +268,30 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
             raise ValidationError("network 不能为空")
         if len(network) > 255:
             raise ValidationError("network 过长")
+        network = assert_managed_network(network)
 
+    max_time = _validate_max_time(data.get("max_time"), app_config)
     has_min_port = data.get("min_port") is not None
     has_max_port = data.get("max_port") is not None
     if port_mappings and (has_min_port or has_max_port):
         raise ValidationError("port_mappings 与 min_port/max_port 只能二选一")
 
-    min_port = data.get("min_port", app_config.MIN_PORT)
-    max_port = data.get("max_port", app_config.MAX_PORT)
+    allowed_min = int(app_config.MIN_PORT)
+    allowed_max = int(app_config.MAX_PORT)
+    min_port = int(data.get("min_port", allowed_min))
+    max_port = int(data.get("max_port", allowed_max))
+
+    if min_port < allowed_min:
+        min_port = allowed_min
+    if max_port > allowed_max:
+        max_port = allowed_max
 
     if min_port >= max_port:
         raise ValidationError("min_port 必须小于 max_port")
+
+    if port_mappings:
+        for _, host_port in port_mappings:
+            _validate_host_port_range(host_port, allowed_min, allowed_max)
 
     normalized_path: Optional[str] = None
     normalized_image: Optional[str] = None
@@ -252,10 +307,10 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
         "cmd": data.get("command"),
         "min_port": min_port,
         "max_port": max_port,
-        "max_time": data.get("max_time", app_config.MAX_TIME),
+        "max_time": max_time,
         "tag": data.get("tag"),
         "uid": uid,
-        "env": _extract_env(data),
+        "env": _extract_env(data, app_config),
         "meta": data.get("_meta", {}),
         "resource_limits": resource_limits,
         "port_mappings": port_mappings,
@@ -287,6 +342,63 @@ def get_docker_file_path(path: str) -> str:
     raise InvalidPathError("未找到 Dockerfile 或 Docker Compose 文件")
 
 
+def _creation_slot_count(params: Dict[str, Any]) -> int:
+    if params.get("source_mode") == "image":
+        return 1
+
+    path = params.get("path")
+    if not path:
+        return 1
+
+    validated_path = validate_path(path)
+    docker_file_path = get_docker_file_path(validated_path)
+
+    if not docker_file_path.endswith((".yaml", ".yml")):
+        return 1
+
+    with open(docker_file_path, "r", encoding="utf-8") as handle:
+        content = yaml.safe_load(handle) or {}
+    services = content.get("services") or {}
+    if not isinstance(services, dict) or not services:
+        return 1
+    return len(services)
+
+
+def _normalize_container_results(response_data):
+    if isinstance(response_data, list):
+        return [item for item in response_data if isinstance(item, dict)]
+    if isinstance(response_data, dict):
+        return [response_data]
+    return []
+
+
+def _apply_frp_configs(response_data, request_data: Dict[str, Any], app_config: AppConfig) -> None:
+    """创建后为容器（或 Compose 多 service 列表）注册 FRP 并回填映射信息。"""
+    if not app_config.ENABLE_FRP:
+        logger.debug("FRP未启用，跳过FRP配置")
+        return
+
+    containers = _normalize_container_results(response_data)
+    if not containers:
+        logger.warning("响应数据为空，无法创建FRP配置")
+        return
+
+    proxy_type = request_data.get("type")
+    if proxy_type:
+        for container_info in containers:
+            container_info["type"] = proxy_type
+
+    try:
+        from services.frp.event_handler import create_configs_batch
+
+        create_configs_batch(containers)
+        for container_info in containers:
+            _add_frp_mapping_info(container_info, app_config)
+    except Exception as frp_err:
+        logger.warning("FRP配置失败: %s", frp_err)
+        logger.exception("FRP配置异常详情")
+
+
 def start_container(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
     """启动容器
     
@@ -308,12 +420,13 @@ def start_container(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[
         raise DockerConnectionError()
     
     manager = get_container_manager()
-    if not manager.check_and_reserve(app_config.MAX_CONTAINERS):
-        raise ContainerLimitExceededError(len(manager.get_container_ids()), app_config.MAX_CONTAINERS)
+    params = extract_and_validate_data(data, app_config)
+    slots = _creation_slot_count(params)
+
+    if not manager.check_and_reserve(app_config.MAX_CONTAINERS, slots=slots):
+        raise ContainerLimitExceededError(manager.get_usage_count(), app_config.MAX_CONTAINERS)
 
     try:
-        params = extract_and_validate_data(data, app_config)
-
         if params["source_mode"] == "image":
             response_data = start_from_image(app_config=app_config, **params)
         else:
@@ -321,39 +434,10 @@ def start_container(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[
             docker_file_path = get_docker_file_path(params['path'])
             response_data = start_container_from_source(docker_file_path, app_config=app_config, **params)
     except Exception:
-        manager.release_reservation()
+        manager.release_reservation(slots=slots)
         raise
-    
-    # 通过事件机制通知FRP服务创建配置
-    if app_config.ENABLE_FRP and response_data:
-        try:
-            proxy_type = data.get("type")
-            if isinstance(response_data, list):
-                for container_info in response_data:
-                    if isinstance(container_info, dict):
-                        if proxy_type:
-                            container_info['type'] = proxy_type
-                        logger.debug("发布 container.created 事件 (列表): %s", container_info.get('container_name'))
-                        get_event_bus().publish('container.created', container_info)
-                        
-                        # 解析代理配置获取映射地址
-                        _add_frp_mapping_info(container_info, app_config)
-            elif isinstance(response_data, dict):
-                if proxy_type:
-                    response_data['type'] = proxy_type
-                logger.debug("发布 container.created 事件 (字典): %s, ports: %s", response_data.get('container_name'), response_data.get('ports'))
-                get_event_bus().publish('container.created', response_data)
-                
-                # 解析代理配置获取映射地址
-                _add_frp_mapping_info(response_data, app_config)
-        except Exception as frp_err:
-            logger.warning("FRP配置失败: %s", frp_err)
-            logger.exception("FRP配置异常详情")
-    elif not app_config.ENABLE_FRP:
-        logger.debug("FRP未启用，跳过FRP配置")
-    elif not response_data:
-        logger.warning("响应数据为空，无法创建FRP配置")
-    
+
+    _apply_frp_configs(response_data, data, app_config)
     return response_data
 
 
@@ -371,46 +455,30 @@ def start_container_streaming(data, app_config=None):
         raise DockerConnectionError()
 
     manager = get_container_manager()
-    if not manager.check_and_reserve(app_config.MAX_CONTAINERS):
-        raise ContainerLimitExceededError(len(manager.get_container_ids()), app_config.MAX_CONTAINERS)
+    params = extract_and_validate_data(data, app_config)
+    slots = _creation_slot_count(params)
+
+    if not manager.check_and_reserve(app_config.MAX_CONTAINERS, slots=slots):
+        raise ContainerLimitExceededError(manager.get_usage_count(), app_config.MAX_CONTAINERS)
 
     response_data = None
     try:
-        params = extract_and_validate_data(data, app_config)
-
         if params["source_mode"] == "image":
             stream_iter = start_from_image_streaming(app_config=app_config, **params)
         else:
             params['path'] = validate_path(params['path'])
             docker_file_path = get_docker_file_path(params['path'])
             stream_iter = start_container_from_source_streaming(docker_file_path, app_config=app_config, **params)
+
+        for item in stream_iter:
+            if isinstance(item, (dict, list)):
+                response_data = item
+            else:
+                yield item
     except Exception:
-        manager.release_reservation()
+        manager.release_reservation(slots=slots)
         raise
 
-    for item in stream_iter:
-        if isinstance(item, (dict, list)):
-            response_data = item
-        else:
-            yield item
-
-    if app_config.ENABLE_FRP and response_data:
-        try:
-            proxy_type = data.get("type")
-            if isinstance(response_data, list):
-                for ci in response_data:
-                    if isinstance(ci, dict):
-                        if proxy_type:
-                            ci['type'] = proxy_type
-                        get_event_bus().publish('container.created', ci)
-                        _add_frp_mapping_info(ci, app_config)
-            elif isinstance(response_data, dict):
-                if proxy_type:
-                    response_data['type'] = proxy_type
-                get_event_bus().publish('container.created', response_data)
-                _add_frp_mapping_info(response_data, app_config)
-        except Exception as frp_err:
-            logger.warning("FRP配置失败: %s", frp_err)
-
+    _apply_frp_configs(response_data, data, app_config)
     yield response_data
 

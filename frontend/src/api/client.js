@@ -1,10 +1,12 @@
 export const API_PREFIX = '/api/v1';
+const CSRF_COOKIE_NAME = 'moegate_csrf';
+const CSRF_HEADER_NAME = 'X-CSRF-Token';
 
 export function getApiBase() {
   const stored = localStorage.getItem('apiBase');
   return (stored && stored.trim()) || getConfiguredDefaultApiBase() || window.location.origin;
 }
- 
+
 function getConfiguredDefaultApiBase() {
   const envBase = String(import.meta.env?.VITE_API_BASE || '').trim();
   if (!envBase) return '';
@@ -25,16 +27,77 @@ export function setApiBase(base) {
   return normalized;
 }
 
-export function getApiKey() {
-  return localStorage.getItem('apiKey') || '';
+export function getCsrfToken() {
+  if (typeof document === 'undefined') return '';
+  const prefix = `${CSRF_COOKIE_NAME}=`;
+  return document.cookie
+    .split(';')
+    .map((part) => part.trim())
+    .filter((part) => part.startsWith(prefix))
+    .map((part) => decodeURIComponent(part.slice(prefix.length)))[0] || '';
 }
 
-export function saveApiKey(key) {
-  localStorage.setItem('apiKey', key);
+export function getAuthHeaders({ includeCsrf = true } = {}) {
+  const headers = {};
+  if (includeCsrf) {
+    const csrf = getCsrfToken();
+    if (csrf) headers[CSRF_HEADER_NAME] = csrf;
+  }
+  return headers;
 }
 
-export function clearApiKey() {
-  localStorage.removeItem('apiKey');
+let unauthorizedHandler = null;
+
+export function onUnauthorized(handler) {
+  unauthorizedHandler = handler;
+}
+
+function notifyUnauthorized(response) {
+  if (response?.status === 401 && typeof unauthorizedHandler === 'function') {
+    unauthorizedHandler();
+  }
+}
+
+async function parseJsonResponse(response) {
+  const text = await response.text();
+  let data = {};
+  try {
+    data = text ? JSON.parse(text) : {};
+  } catch {
+    data = {};
+  }
+  if (!response.ok) {
+    notifyUnauthorized(response);
+    const msg = normalizeApiErrorMessage(data?.msg || data?.message || `HTTP ${response.status}`);
+    throw new Error(msg);
+  }
+  return data;
+}
+
+export async function checkSession() {
+  const response = await fetch(`${getApiBase()}${API_PREFIX}/auth/session`, {
+    credentials: 'include',
+  });
+  return parseJsonResponse(response);
+}
+
+export async function loginWithCookie(apiKey) {
+  const response = await fetch(`${getApiBase()}${API_PREFIX}/auth/login`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ api_key: apiKey }),
+  });
+  return parseJsonResponse(response);
+}
+
+export async function logoutSession() {
+  const response = await fetch(`${getApiBase()}${API_PREFIX}/auth/logout`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: getAuthHeaders(),
+  });
+  return parseJsonResponse(response);
 }
 
 function normalizeApiErrorMessage(message) {
@@ -53,9 +116,7 @@ function normalizeApiErrorMessage(message) {
 }
 
 export async function apiRequest(endpoint, { method = 'GET', body = null, timeoutMs = 15000 } = {}) {
-  const headers = { 'Content-Type': 'application/json' };
-  const key = getApiKey();
-  if (key) headers['X-API-Key'] = key;
+  const headers = { 'Content-Type': 'application/json', ...getAuthHeaders() };
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -64,6 +125,7 @@ export async function apiRequest(endpoint, { method = 'GET', body = null, timeou
     const response = await fetch(`${getApiBase()}${API_PREFIX}${endpoint}`, {
       method,
       headers,
+      credentials: 'include',
       signal: controller.signal,
       body: body && method !== 'GET' ? JSON.stringify(body) : null,
     });
@@ -77,6 +139,7 @@ export async function apiRequest(endpoint, { method = 'GET', body = null, timeou
     }
 
     if (!response.ok) {
+      notifyUnauthorized(response);
       const msg = normalizeApiErrorMessage(data?.msg || data?.message || `HTTP ${response.status}`);
       throw new Error(msg);
     }

@@ -1,0 +1,14 @@
+services:
+  frps:
+    image: snowdreamtech/frps:0.58.0
+    container_name: moegate-frps
+    restart: unless-stopped
+    volumes:
+      - ./frps.toml:/etc/frp/frps.toml:ro
+    ports:
+      - "${FRP_SERVER_PORT:-7000}:7000"
+
+  frpc:
+    depends_on:
+      frps:
+        condition: service_started

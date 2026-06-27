@@ -1,14 +1,15 @@
 import logging
 import os
-from flask import Flask, send_from_directory
+import uuid
+from flask import Flask, send_from_directory, g, request
 from flask_cors import CORS
 from werkzeug.utils import safe_join
 from config import config
 from core.responses import error
 from core.exceptions import ContainerServiceError
 from core.logging import configure_logging
-from workers.performance import start_performance_monitoring
 from routes import api_bp
+from utils.static_assets import verify_static_build_info
 
 logger = logging.getLogger(__name__)
 
@@ -26,17 +27,12 @@ def should_start_background_workers() -> bool:
 
 def resolve_web_static_dir() -> str:
     src_dir = os.path.dirname(__file__)
-    legacy_static_dir = os.path.join(src_dir, 'static')
-    vue_dist_dir = os.path.join(src_dir, 'frontend', 'dist')
-
-    if os.path.exists(os.path.join(legacy_static_dir, 'index.html')):
-        logger.info("使用静态目录: %s", legacy_static_dir)
-        return legacy_static_dir
-    if os.path.exists(os.path.join(vue_dist_dir, 'index.html')):
-        logger.info("使用前端构建产物目录: %s", vue_dist_dir)
-        return vue_dist_dir
-    logger.info("默认使用静态目录: %s", legacy_static_dir)
-    return legacy_static_dir
+    static_dir = os.path.join(src_dir, 'static')
+    if os.path.exists(os.path.join(static_dir, 'index.html')):
+        logger.info("使用静态目录: %s", static_dir)
+    else:
+        logger.warning("静态目录缺少 index.html: %s", static_dir)
+    return static_dir
 
 
 def create_app():
@@ -44,10 +40,17 @@ def create_app():
     static_dir = None
     if getattr(config, "ENABLE_WEBUI", True):
         static_dir = resolve_web_static_dir()
+        verify_static_build_info(static_dir)
     app = Flask(__name__, static_folder=static_dir, static_url_path='/static' if static_dir else None)
 
     _configure_cors(app)
     configure_logging()
+    from services import runtime_store
+    runtime_store.reset_session()
+    _register_request_id_hook(app)
+    _register_health_route(app)
+    _register_metrics_route(app)
+    _register_webui_auth_hook(app)
     _register_event_handlers()
     app.register_blueprint(api_bp)
     _register_error_handlers(app)
@@ -56,27 +59,116 @@ def create_app():
     else:
         logger.info("WebUI 已禁用（ENABLE_WEBUI=False），仅提供 API")
 
-    start_performance_monitoring()
+    if should_start_background_workers():
+        from utils.container_manager import get_container_manager
+        manager = get_container_manager()
+        manager.reconcile_managed_containers()
+        manager.start_reconcile_worker()
+    else:
+        logger.debug("跳过后台 worker 启动（Werkzeug reloader 父进程）")
 
     return app
 
 
+def _register_request_id_hook(app):
+    @app.before_request
+    def assign_request_id():
+        incoming = request.headers.get("X-Request-Id")
+        g.request_id = (incoming.strip()[:64] if incoming else str(uuid.uuid4())[:8])
+
+    @app.after_request
+    def attach_request_id(response):
+        request_id = getattr(g, "request_id", None)
+        if request_id:
+            response.headers["X-Request-Id"] = request_id
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "SAMEORIGIN")
+        response.headers.setdefault("Referrer-Policy", "strict-origin-when-cross-origin")
+        if not config.DEBUG:
+            response.headers.setdefault(
+                "Content-Security-Policy",
+                "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+                "script-src 'self'; connect-src 'self'",
+            )
+        return response
+
+
+def _register_health_route(app):
+    from infra.docker import ensure_client
+
+    @app.route("/healthz", methods=["GET"])
+    def healthz():
+        """公开探活端点（无需 API Key）；仅返回状态码，避免泄露组件细节。"""
+        try:
+            client = ensure_client()
+            if client:
+                client.ping()
+                return "", 200
+        except Exception:
+            pass
+        return "", 503
+
+
+def _register_metrics_route(app):
+    from core.metrics import render_prometheus_metrics
+    from middleware.metrics_auth import check_metrics_access, metrics_endpoint_enabled
+
+    if not metrics_endpoint_enabled():
+        return
+
+    @app.route("/metrics", methods=["GET"])
+    def public_metrics():
+        denied = check_metrics_access()
+        if denied is not None:
+            return denied
+        return render_prometheus_metrics()
+
+    logger.info("已启用 /metrics 端点（public=%s, token=%s）", config.ENABLE_PUBLIC_METRICS, bool(config.METRICS_TOKEN))
+
+
+def _register_webui_auth_hook(app):
+    from middleware.webui_auth import check_webui_basic_auth, webui_auth_enabled
+
+    if not webui_auth_enabled():
+        return
+
+    @app.before_request
+    def enforce_webui_basic_auth():
+        denied = check_webui_basic_auth()
+        if denied is not None:
+            return denied
+
+    logger.info("已启用 WebUI Basic 认证（用户: %s）", config.WEBUI_BASIC_AUTH_USER)
+
+
 def _configure_cors(app):
-    if config.DEBUG:
-        CORS(app)
+    allowed_origins = list(config.CORS_ALLOWED_ORIGINS or [])
+    if config.DEBUG and not allowed_origins:
+        allowed_origins = [
+            "http://127.0.0.1:5173",
+            "http://localhost:5173",
+        ]
+
+    if allowed_origins:
+        CORS(app, resources={
+            r"/api/v1/*": {
+                "origins": allowed_origins,
+                "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
+                "allow_headers": [
+                    "Content-Type",
+                    "Authorization",
+                    "X-API-Key",
+                    "X-CSRF-Token",
+                    "X-Metrics-Token",
+                ],
+                "supports_credentials": True,
+            }
+        })
+        logger.info("已启用 CORS 白名单: %s", allowed_origins)
+    elif config.DEBUG:
+        logger.warning("调试模式未配置 CORS_ALLOWED_ORIGINS，仅允许本地 Vite 开发源")
     else:
-        allowed_origins = config.CORS_ALLOWED_ORIGINS
-        if allowed_origins:
-            CORS(app, resources={
-                r"/api/v1/*": {
-                    "origins": allowed_origins,
-                    "methods": ["GET", "POST", "PUT", "PATCH", "DELETE"],
-                    "allow_headers": ["Content-Type", "Authorization", "X-API-Key"],
-                }
-            })
-            logger.info("已启用生产CORS白名单: %s", allowed_origins)
-        else:
-            logger.warning("生产模式未配置 CORS_ALLOWED_ORIGINS，默认不放开浏览器跨域访问")
+        logger.warning("生产模式未配置 CORS_ALLOWED_ORIGINS，默认不放开浏览器跨域访问")
 
 
 def _register_static_routes(app, static_dir):
@@ -151,8 +243,8 @@ def _register_event_handlers():
     logger.info("容器自动销毁回调已注册")
 
     if config.ENABLE_FRP:
-        from services.frp import create_config
-        get_event_bus().subscribe('container.created', create_config)
+        from services.frp.event_handler import handle_container_created
+        get_event_bus().subscribe('container.created', handle_container_created)
 
 
 app = create_app()

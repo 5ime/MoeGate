@@ -1,0 +1,29 @@
+# 生产推荐叠加 deploy/compose/socket-proxy.example.yml，限制 Docker API 高危操作。
+# 详见 docs/deploy.md#docker-socket-proxyh1-缓解
+services:
+  moegate:
+    build: .
+    image: moegate:latest
+    container_name: moegate
+    restart: unless-stopped
+    ports:
+      - "${API_PORT:-8080}:8080"
+    env_file:
+      - .env
+    environment:
+      API_HOST: 0.0.0.0
+      API_DEBUG: "false"
+      ALLOWED_BASE_DIR: /data/containers
+      SHUTDOWN_DESTROY_CONTAINERS: "false"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - moegate-data:/data/containers
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+volumes:
+  moegate-data:

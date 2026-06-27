@@ -3,16 +3,12 @@ import ipaddress
 import os
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import List, Optional
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
-# 应用版本
-try:
-    from core.version import VERSION as PACKAGE_VERSION  # type: ignore
-except Exception:
-    PACKAGE_VERSION = "0.1.0"
+from core.version import VERSION as PACKAGE_VERSION
 
 load_dotenv()
 
@@ -70,6 +66,14 @@ class AppConfig:
     # WebUI 面板开关（关闭后不注册静态路由，仅提供 API）
     ENABLE_WEBUI: bool = _get_bool_env("ENABLE_WEBUI", True)
 
+    # WebUI Basic 认证（两者均配置时启用）
+    WEBUI_BASIC_AUTH_USER: Optional[str] = os.getenv("WEBUI_BASIC_AUTH_USER")
+    WEBUI_BASIC_AUTH_PASSWORD: Optional[str] = os.getenv("WEBUI_BASIC_AUTH_PASSWORD")
+
+    # Prometheus 指标
+    ENABLE_PUBLIC_METRICS: bool = _get_bool_env("ENABLE_PUBLIC_METRICS", False)
+    METRICS_TOKEN: Optional[str] = os.getenv("METRICS_TOKEN")
+
     # 服务
     PORT: int = _get_int_env("API_PORT", 8080)
     HOST: str = os.getenv("API_HOST", "0.0.0.0")
@@ -81,6 +85,8 @@ class AppConfig:
     MIN_PORT: int = _get_int_env("MIN_PORT", 20000)
     MAX_PORT: int = _get_int_env("MAX_PORT", 30000)
     MAX_RENEW_TIMES: int = _get_int_env("MAX_RENEW_TIMES", 3)
+    MAX_CONTAINER_ENV_KEYS: int = _get_int_env("MAX_CONTAINER_ENV_KEYS", 64)
+    MAX_CONTAINER_ENV_VALUE_LEN: int = _get_int_env("MAX_CONTAINER_ENV_VALUE_LEN", 4096)
     CONTAINER_MEMORY_LIMIT: str = os.getenv("CONTAINER_MEMORY_LIMIT", "512m")
     CONTAINER_CPU_LIMIT: Optional[float] = _get_float_env_optional("CONTAINER_CPU_LIMIT")
     CONTAINER_CPU_SHARES: Optional[int] = _get_int_env_optional("CONTAINER_CPU_SHARES")
@@ -102,13 +108,25 @@ class AppConfig:
     FRP_DOMAIN_SUFFIX: Optional[str] = os.getenv("FRP_DOMAIN_SUFFIX")
     FRP_USE_DOMAIN: bool = _get_bool_env("FRP_USE_DOMAIN", False)
     FRP_VHOST_HTTP_PORT: Optional[int] = _get_int_env_optional("FRP_VHOST_HTTP_PORT", None)
+    FRP_LOCAL_IP: str = os.getenv("FRP_LOCAL_IP", "127.0.0.1")
 
     # 安全
     API_KEY: Optional[str] = os.getenv("API_KEY")
+    ENABLE_API_SESSION_COOKIE: bool = _get_bool_env("ENABLE_API_SESSION_COOKIE", True)
+    API_SESSION_COOKIE_NAME: str = os.getenv("API_SESSION_COOKIE_NAME", "moegate_session")
+    API_SESSION_TTL_SEC: int = _get_int_env("API_SESSION_TTL_SEC", 86400)
+    API_SESSION_COOKIE_SECURE: bool = _get_bool_env("API_SESSION_COOKIE_SECURE", False)
+    API_SESSION_COOKIE_SAMESITE: str = os.getenv("API_SESSION_COOKIE_SAMESITE", "Lax")
+    API_SESSION_SECRET: Optional[str] = os.getenv("API_SESSION_SECRET")
+    ENABLE_API_CSRF: bool = _get_bool_env("ENABLE_API_CSRF", True)
+    API_CSRF_COOKIE_NAME: str = os.getenv("API_CSRF_COOKIE_NAME", "moegate_csrf")
+    API_CSRF_HEADER_NAME: str = os.getenv("API_CSRF_HEADER_NAME", "X-CSRF-Token")
     ALLOWED_BASE_DIR: Optional[str] = os.getenv("ALLOWED_BASE_DIR")
+    RUNTIME_STORE_PERSIST: bool = _get_bool_env("RUNTIME_STORE_PERSIST", False)
 
     # 限流 / 超时
     RATE_LIMIT_PER_MIN: int = _get_int_env("RATE_LIMIT_PER_MIN", 60)
+    AUTH_FAILURE_LIMIT_PER_MIN: int = _get_int_env("AUTH_FAILURE_LIMIT_PER_MIN", 10)
     REQUEST_TIMEOUT: int = _get_int_env("REQUEST_TIMEOUT", 30)
     RATE_LIMIT_MAX_TRACKED_KEYS: int = _get_int_env("RATE_LIMIT_MAX_TRACKED_KEYS", 10000)
     RATE_LIMIT_GC_INTERVAL_SECONDS: int = _get_int_env("RATE_LIMIT_GC_INTERVAL_SECONDS", 30)
@@ -119,33 +137,43 @@ class AppConfig:
 
     # 反向代理 / CORS
     TRUST_PROXY_HEADERS: bool = _get_bool_env("TRUST_PROXY_HEADERS", False)
+    TRUSTED_PROXY_IPS: list = field(default_factory=lambda: _get_csv_env("TRUSTED_PROXY_IPS"))
     CORS_ALLOWED_ORIGINS: list = field(default_factory=lambda: _get_csv_env("CORS_ALLOWED_ORIGINS"))
 
-    # 分布式（已移除 Redis，以下参数保留占位但不启用外部后端）
+    # 运行态 API 是否禁止超过 .env 启动值的配额（MAX_CONTAINERS / MAX_RENEW_TIMES）
+    LOCK_RUNTIME_QUOTA_TO_BOOT: bool = _get_bool_env("LOCK_RUNTIME_QUOTA_TO_BOOT", True)
+
+    # 告警 Webhook
     ALERT_WEBHOOK_URL: Optional[str] = os.getenv("ALERT_WEBHOOK_URL")
     ALERT_WEBHOOK_TIMEOUT: int = _get_int_env("ALERT_WEBHOOK_TIMEOUT", 5)
 
     # 日志
     LOG_LEVEL: Optional[str] = os.getenv("LOG_LEVEL")
+    LOG_FORMAT: str = os.getenv("LOG_FORMAT", "text").strip().lower()
     LOG_FILE: Optional[str] = os.getenv("LOG_FILE")
     LOG_MAX_SIZE: str = os.getenv("LOG_MAX_SIZE", "10MB")
     LOG_BACKUP_COUNT: int = _get_int_env("LOG_BACKUP_COUNT", 5)
 
-    # 性能监控
-    ENABLE_PERFORMANCE_MONITORING: bool = _get_bool_env("ENABLE_PERFORMANCE_MONITORING", False)
-    PERFORMANCE_LOG_INTERVAL: int = _get_int_env("PERFORMANCE_LOG_INTERVAL", 300)
-    ALERT_CPU_THRESHOLD: int = _get_int_env("ALERT_CPU_THRESHOLD", 95)
-    ALERT_CPU_SUSTAINED_INTERVALS: int = _get_int_env("ALERT_CPU_SUSTAINED_INTERVALS", 3)
-    ALERT_COOLDOWN_SEC: int = _get_int_env("ALERT_COOLDOWN_SEC", 900)
-    ALERT_MEM_THRESHOLD: int = _get_int_env("ALERT_MEM_THRESHOLD", 90)
-    ALERT_MEM_SUSTAINED_INTERVALS: int = _get_int_env("ALERT_MEM_SUSTAINED_INTERVALS", 3)
+    # 关闭时是否销毁所有受管容器（生产环境建议关闭）
+    SHUTDOWN_DESTROY_CONTAINERS: bool = _get_bool_env("SHUTDOWN_DESTROY_CONTAINERS", False)
 
-    # 运行时配置写入
-    # 为安全起见，生产建议关闭（即使 API_KEY 泄露，也避免持久化篡改 .env）
-    ALLOW_RUNTIME_CONFIG_WRITE: bool = _get_bool_env("ALLOW_RUNTIME_CONFIG_WRITE", False)
+    # 容器到期 reconcile 扫描间隔（秒）
+    EXPIRE_RECONCILE_INTERVAL_SEC: int = _get_int_env("EXPIRE_RECONCILE_INTERVAL_SEC", 60)
 
     # Docker
     DISABLE_DOCKER_CREDENTIALS: bool = _get_bool_env("DISABLE_DOCKER_CREDENTIALS", False)
+
+    # Compose 启动策略：ctf（默认，允许 privileged 等）| strict（生产加固，拒绝高危配置）
+    COMPOSE_POLICY: str = os.getenv("COMPOSE_POLICY", "ctf").strip().lower() or "ctf"
+
+    # Compose 不支持字段的处理：warn（记录/API 提示）| error（拒绝启动）
+    COMPOSE_UNSUPPORTED: str = os.getenv("COMPOSE_UNSUPPORTED", "warn").strip().lower() or "warn"
+
+    # 多实例共享 ALLOWED_BASE_DIR 时，通过文件锁协调容器名额预留
+    ENABLE_SHARED_QUOTA: bool = _get_bool_env("ENABLE_SHARED_QUOTA", True)
+
+    # 由 __post_init__ 解析，供 middleware/ip 使用
+    TRUSTED_PROXY_NETWORKS: List[object] = field(default_factory=list, init=False, repr=False)
 
     def __post_init__(self):
         # 端口范围
@@ -170,6 +198,14 @@ class AppConfig:
 
         if self.MAX_RENEW_TIMES < 0:
             raise ValueError("MAX_RENEW_TIMES 不能为负数")
+
+        if self.MAX_CONTAINER_ENV_KEYS <= 0:
+            raise ValueError("MAX_CONTAINER_ENV_KEYS 必须大于 0")
+        if self.MAX_CONTAINER_ENV_VALUE_LEN <= 0:
+            raise ValueError("MAX_CONTAINER_ENV_VALUE_LEN 必须大于 0")
+
+        if self.AUTH_FAILURE_LIMIT_PER_MIN <= 0:
+            raise ValueError("AUTH_FAILURE_LIMIT_PER_MIN 必须大于 0")
 
         if self.WEBUI_POLL_INTERVAL_SEC <= 0:
             raise ValueError("WEBUI_POLL_INTERVAL_SEC 必须大于 0")
@@ -196,6 +232,18 @@ class AppConfig:
         # API 认证
         if not self.API_KEY or self.API_KEY == "your_secret_api_key":
             raise ValueError("必须配置有效的 API_KEY，且不能使用默认占位值")
+
+        if self.ENABLE_API_SESSION_COOKIE:
+            if not self.API_SESSION_SECRET or self.API_SESSION_SECRET == self.API_KEY:
+                raise ValueError(
+                    "启用 Cookie Session 时必须配置独立的 API_SESSION_SECRET，"
+                    "且不能与 API_KEY 相同"
+                )
+
+        if not str(self.API_CSRF_COOKIE_NAME or "").strip():
+            raise ValueError("API_CSRF_COOKIE_NAME 不能为空")
+        if not str(self.API_CSRF_HEADER_NAME or "").strip():
+            raise ValueError("API_CSRF_HEADER_NAME 不能为空")
 
         # 路径白名单
         if not self.ALLOWED_BASE_DIR:
@@ -251,23 +299,84 @@ class AppConfig:
         if self.SSE_MAX_LOG_EVENTS <= 0:
             raise ValueError("SSE_MAX_LOG_EVENTS 必须大于 0")
 
-        # 限流后端固定为内存实现（已移除 Redis 支持）
         self.RATE_LIMIT_BACKEND = "memory"
         if self.ALERT_WEBHOOK_TIMEOUT <= 0:
             raise ValueError("ALERT_WEBHOOK_TIMEOUT 必须大于 0")
 
-        if self.ENABLE_PERFORMANCE_MONITORING and self.PERFORMANCE_LOG_INTERVAL <= 0:
-            raise ValueError("PERFORMANCE_LOG_INTERVAL 必须大于 0")
-        if self.ALERT_CPU_THRESHOLD <= 0 or self.ALERT_CPU_THRESHOLD > 100:
-            raise ValueError("ALERT_CPU_THRESHOLD 必须在 1-100 之间")
-        if self.ALERT_CPU_SUSTAINED_INTERVALS <= 0:
-            raise ValueError("ALERT_CPU_SUSTAINED_INTERVALS 必须大于 0")
-        if self.ALERT_COOLDOWN_SEC < 0:
-            raise ValueError("ALERT_COOLDOWN_SEC 不能为负数")
-        if self.ALERT_MEM_THRESHOLD <= 0 or self.ALERT_MEM_THRESHOLD > 100:
-            raise ValueError("ALERT_MEM_THRESHOLD 必须在 1-100 之间")
-        if self.ALERT_MEM_SUSTAINED_INTERVALS <= 0:
-            raise ValueError("ALERT_MEM_SUSTAINED_INTERVALS 必须大于 0")
+        self.TRUSTED_PROXY_NETWORKS = self._parse_trusted_proxy_networks()
+
+        if not self.DEBUG:
+            if self.ENABLE_PUBLIC_METRICS and not str(self.METRICS_TOKEN or "").strip():
+                raise ValueError(
+                    "生产环境启用 ENABLE_PUBLIC_METRICS 时必须配置 METRICS_TOKEN"
+                )
+            if self.TRUST_PROXY_HEADERS and not self.TRUSTED_PROXY_IPS:
+                raise ValueError(
+                    "生产环境启用 TRUST_PROXY_HEADERS 时必须配置 TRUSTED_PROXY_IPS"
+                )
+            if len(str(self.API_KEY or "")) < 32:
+                raise ValueError(
+                    "生产环境 API_KEY 长度不足 32 字符，请使用高熵随机密钥"
+                )
+
+        if self.EXPIRE_RECONCILE_INTERVAL_SEC <= 0:
+            raise ValueError("EXPIRE_RECONCILE_INTERVAL_SEC 必须大于 0")
+
+        if self.LOG_FORMAT not in ("text", "json"):
+            raise ValueError("LOG_FORMAT 仅支持 text 或 json")
+
+        if self.COMPOSE_POLICY not in ("ctf", "strict"):
+            raise ValueError("COMPOSE_POLICY 仅支持 ctf 或 strict")
+
+        if self.COMPOSE_UNSUPPORTED not in ("warn", "error"):
+            raise ValueError("COMPOSE_UNSUPPORTED 仅支持 warn 或 error")
+
+        self._log_production_warnings()
+
+    def _parse_trusted_proxy_networks(self) -> List[object]:
+        """将 TRUSTED_PROXY_IPS 解析为 ip_network 列表（支持单 IP 与 CIDR）。"""
+        networks: List[object] = []
+        for raw in self.TRUSTED_PROXY_IPS or []:
+            text = str(raw or "").strip()
+            if not text:
+                continue
+            try:
+                if "/" in text:
+                    networks.append(ipaddress.ip_network(text, strict=False))
+                else:
+                    addr = ipaddress.ip_address(text)
+                    prefix = 32 if addr.version == 4 else 128
+                    networks.append(ipaddress.ip_network(f"{addr}/{prefix}", strict=False))
+            except ValueError as exc:
+                raise ValueError(f"TRUSTED_PROXY_IPS 含非法地址: {text}") from exc
+        return networks
+
+    def _log_production_warnings(self) -> None:
+        """非调试模式下提示常见生产误配（L3–L5）。"""
+        if self.DEBUG:
+            return
+        if self.TRUST_PROXY_HEADERS:
+            if self.TRUSTED_PROXY_IPS:
+                logger.warning(
+                    "TRUST_PROXY_HEADERS 已启用：仅当直连来源 IP 属于 TRUSTED_PROXY_IPS 时"
+                    "才读取 X-Forwarded-For / X-Real-IP"
+                )
+            else:
+                logger.warning(
+                    "TRUST_PROXY_HEADERS 已启用但未配置 TRUSTED_PROXY_IPS："
+                    "将忽略代理头并使用 request.remote_addr（调试模式允许）"
+                )
+        if self.HOST in ("0.0.0.0", "::"):
+            logger.warning(
+                "API_HOST=%s：服务监听所有网卡，请配合防火墙限制 %s 端口访问",
+                self.HOST,
+                self.PORT,
+            )
+        if self.ENABLE_API_SESSION_COOKIE and not self.API_SESSION_COOKIE_SECURE:
+            logger.warning(
+                "API_SESSION_COOKIE_SECURE=false：HTTPS 生产环境应设为 true，"
+                "否则 Session Cookie 可能经明文 HTTP 传输"
+            )
 
 
 try:

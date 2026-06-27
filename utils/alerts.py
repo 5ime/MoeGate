@@ -5,10 +5,9 @@ import re
 from datetime import datetime, timezone
 from typing import Dict, Any
 
-import requests
-
 from config import config
 from infra.docker import ensure_client
+from utils.url_validator import post_webhook_json, validate_webhook_url
 
 logger = logging.getLogger(__name__)
 
@@ -258,6 +257,11 @@ def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
     if not url:
         return False
 
+    ok, reason = validate_webhook_url(url)
+    if not ok:
+        logger.warning("告警 webhook URL 校验失败，已拒绝发送: %s", reason)
+        return False
+
     payload = dict(payload or {})
     # 自动附加运行时快照（若调用方已提供则不覆盖）
     if "snapshot" not in payload:
@@ -274,12 +278,8 @@ def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
         }
 
     try:
-        resp = requests.post(
-            url,
-            json=body,
-            timeout=config.ALERT_WEBHOOK_TIMEOUT,
-        )
-        if 200 <= resp.status_code < 300:
+        resp = post_webhook_json(url, body, timeout=config.ALERT_WEBHOOK_TIMEOUT)
+        if 200 <= resp.status < 300:
             return True
 
         # 飞书卡片不被支持时降级为 text
@@ -289,12 +289,15 @@ def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
                     "msg_type": "text",
                     "content": {"text": _format_feishu_text(event_type, payload)},
                 }
-                resp2 = requests.post(url, json=fallback, timeout=config.ALERT_WEBHOOK_TIMEOUT)
-                if 200 <= resp2.status_code < 300:
+                resp2 = post_webhook_json(url, fallback, timeout=config.ALERT_WEBHOOK_TIMEOUT)
+                if 200 <= resp2.status < 300:
                     return True
             except Exception:
                 pass
-        logger.warning("告警发送失败，HTTP %s: %s", resp.status_code, resp.text[:200])
+        response_text = (getattr(resp, "data", b"") or b"")[:200]
+        if isinstance(response_text, bytes):
+            response_text = response_text.decode("utf-8", errors="replace")
+        logger.warning("告警发送失败，HTTP %s: %s", resp.status, response_text)
         return False
     except Exception as e:
         logger.warning("告警发送异常: %s", e)

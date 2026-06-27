@@ -28,7 +28,7 @@ def log_request(action: str):
     def decorator(f):
         @wraps(f)
         def wrapper(*args, **kwargs):
-            request_id = str(uuid.uuid4())[:8]
+            request_id = getattr(g, "request_id", None) or str(uuid.uuid4())[:8]
             g.request_id = request_id
             start_time = time.time()
             is_high_frequency = _is_high_frequency_request(action)

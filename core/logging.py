@@ -1,9 +1,42 @@
 """日志配置"""
+import json
 import logging
 import re
+from datetime import datetime, timezone
 from config import config
 
 logger = logging.getLogger(__name__)
+
+
+class JsonLogFormatter(logging.Formatter):
+    """结构化 JSON 日志格式，便于 ELK/Loki 采集。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname,
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        if record.funcName and record.funcName != "<module>":
+            payload["func"] = f"{record.funcName}:{record.lineno}"
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def _build_formatter() -> logging.Formatter:
+    log_format = (getattr(config, "LOG_FORMAT", None) or "text").lower()
+    if log_format == "json":
+        return JsonLogFormatter()
+
+    if config.DEBUG:
+        text_format = (
+            '%(asctime)s | %(levelname)-4s | %(name)s | %(funcName)s:%(lineno)d | %(message)s'
+        )
+    else:
+        text_format = '%(asctime)s | %(levelname)-4s | %(message)s'
+    return logging.Formatter(text_format, datefmt='%Y-%m-%d %H:%M:%S')
 
 
 def configure_logging():
@@ -13,16 +46,10 @@ def configure_logging():
     else:
         log_level = logging.DEBUG if config.DEBUG else logging.INFO
 
-    if config.DEBUG:
-        log_format = (
-            '%(asctime)s | %(levelname)-4s | %(name)s | %(funcName)s:%(lineno)d | %(message)s'
-        )
-    else:
-        log_format = '%(asctime)s | %(levelname)-4s | %(message)s'
-
+    formatter = _build_formatter()
     handlers = []
     console_handler = logging.StreamHandler()
-    console_handler.setFormatter(logging.Formatter(log_format, datefmt='%Y-%m-%d %H:%M:%S'))
+    console_handler.setFormatter(formatter)
     handlers.append(console_handler)
 
     if config.LOG_FILE:
@@ -44,7 +71,7 @@ def configure_logging():
                 backupCount=config.LOG_BACKUP_COUNT,
                 encoding='utf-8',
             )
-            file_handler.setFormatter(logging.Formatter(log_format, datefmt='%Y-%m-%d %H:%M:%S'))
+            file_handler.setFormatter(formatter)
             handlers.append(file_handler)
             logger.info("文件日志已启用: %s (最大: %s, 备份: %d)",
                         config.LOG_FILE, config.LOG_MAX_SIZE, config.LOG_BACKUP_COUNT)

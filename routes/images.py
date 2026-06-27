@@ -1,22 +1,17 @@
 """镜像管理路由。"""
-import json
+import logging
 from flask import Blueprint, g, request, Response
 
-from core.exceptions import ContainerServiceError
-from core.responses import exception, success
+from core.route_helpers import handle_service_call
+from core.sse_helpers import iter_sse_events
 from middleware import log_request, rate_limit, require_api_key, validate_json
 from services.image import delete_image, get_image_detail, list_images, pull_image, pull_image_streaming, prune_images
 from config import config
 
 bp = Blueprint("images", __name__, url_prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
-
-def handle_service_call(func, success_message: str = "操作成功", success_code: int = 200, *args, **kwargs):
-    try:
-        data = func(*args, **kwargs)
-        return success(data, success_message, code=success_code)
-    except ContainerServiceError as exc:
-        return exception(exc)
+_SSE_INTERNAL_ERROR_MSG = "流式操作失败，请稍后重试"
 
 
 @bp.route("/images", methods=["GET"])
@@ -32,7 +27,8 @@ def get_images():
 @log_request("获取镜像详情")
 @rate_limit(max_per_min=60)
 def get_image(image_ref: str):
-    return handle_service_call(get_image_detail, "获取镜像详情成功", 200, image_ref)
+    verbose = str(request.args.get("verbose", "")).strip().lower() in {"1", "true", "yes", "on"}
+    return handle_service_call(get_image_detail, "获取镜像详情成功", 200, image_ref, verbose=verbose)
 
 
 @bp.route("/images/pull", methods=["POST"])
@@ -56,36 +52,14 @@ def pull_image_stream_route():
     max_line_len = int(getattr(config, "SSE_MAX_LOG_LINE_LENGTH", 2000) or 2000)
 
     def generate():
-        emitted_events = 0
-        try:
-            for item in pull_image_streaming(payload.get("image"), app_config=config):
-                if isinstance(item, dict):
-                    yield f"event: result\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
-                    emitted_events += 1
-                else:
-                    text = str(item)
-                    if len(text) > max_line_len:
-                        text = f"{text[:max_line_len]}... [truncated]"
-                    yield f"event: log\ndata: {text}\n\n"
-                    emitted_events += 1
-
-                if emitted_events >= max_events:
-                    yield (
-                        "event: error\ndata: "
-                        + json.dumps(
-                            {
-                                "msg": f"SSE日志事件超过上限({max_events})，已提前终止",
-                                "code": 429,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n\n"
-                    )
-                    break
-        except ContainerServiceError as exc:
-            yield f"event: error\ndata: {json.dumps({'msg': exc.message, 'code': exc.code}, ensure_ascii=False)}\n\n"
-        except Exception as exc:
-            yield f"event: error\ndata: {json.dumps({'msg': str(exc), 'code': 500}, ensure_ascii=False)}\n\n"
+        yield from iter_sse_events(
+            pull_image_streaming(payload.get("image"), app_config=config),
+            max_events=max_events,
+            max_line_len=max_line_len,
+            internal_error_msg=_SSE_INTERNAL_ERROR_MSG,
+            logger=logger,
+            result_types=(dict,),
+        )
 
     return Response(generate(), mimetype="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 

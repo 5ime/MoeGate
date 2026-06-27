@@ -1,7 +1,7 @@
 <script setup>
 import { computed, ref, nextTick, watch, onBeforeUnmount } from 'vue';
 import BaseModal from './BaseModal.vue';
-import { API_PREFIX, getApiBase, getApiKey } from '../api/client';
+import { API_PREFIX, getApiBase, getAuthHeaders } from '../api/client';
 
 const props = defineProps({
   visible: Boolean,
@@ -85,13 +85,12 @@ async function startStream(body) {
   abortController = new AbortController();
 
   try {
-    const headers = { 'Content-Type': 'application/json' };
-    const key = getApiKey();
-    if (key) headers['X-API-Key'] = key;
+    const headers = { 'Content-Type': 'application/json', ...getAuthHeaders() };
 
     const resp = await fetch(`${getApiBase()}${API_PREFIX}/containers/stream`, {
       method: 'POST',
       headers,
+      credentials: 'include',
       body: JSON.stringify(body),
       signal: abortController.signal,
     });

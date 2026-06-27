@@ -1,6 +1,6 @@
 {
   "name": "moegate-webui",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "private": true,
   "type": "module",
   "scripts": {
@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "pinia": "^3.0.4",
     "uplot": "^1.6.31",
     "vue": "^3.5.13"
   },

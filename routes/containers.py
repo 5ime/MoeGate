@@ -1,5 +1,5 @@
 """容器管理路由"""
-import json
+import logging
 from flask import Blueprint, request, g, Response
 from services.container import (
     start_container,
@@ -26,26 +26,14 @@ from middleware import (
     require_api_key,
     get_client_ip,
 )
-from core.responses import (
-    success,
-    exception,
-)
-from core.exceptions import (
-    ContainerServiceError,
-)
+from core.route_helpers import handle_service_call
+from core.sse_helpers import iter_sse_events
 from config import config
 
 bp = Blueprint("containers", __name__, url_prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
-
-def handle_service_call(func, success_message: str = "操作成功", success_code: int = 200, *args, **kwargs):
-    """调用服务函数并统一封装响应。"""
-    try:
-        data = func(*args, **kwargs)
-        return success(data, success_message, code=success_code)
-    except ContainerServiceError as e:
-        return exception(e)
-    # 其余异常交给全局 errorhandler 处理
+_SSE_INTERNAL_ERROR_MSG = "流式操作失败，请稍后重试"
 
 
 @bp.route("/containers", methods=["POST"])
@@ -81,36 +69,13 @@ def create_container_stream():
     max_line_len = int(getattr(config, "SSE_MAX_LOG_LINE_LENGTH", 2000) or 2000)
 
     def generate():
-        emitted_events = 0
-        try:
-            for item in start_container_streaming(dto, app_config=config):
-                if isinstance(item, (dict, list)):
-                    yield f"event: result\ndata: {json.dumps(item, ensure_ascii=False)}\n\n"
-                    emitted_events += 1
-                else:
-                    text = str(item)
-                    if len(text) > max_line_len:
-                        text = f"{text[:max_line_len]}... [truncated]"
-                    yield f"event: log\ndata: {text}\n\n"
-                    emitted_events += 1
-
-                if emitted_events >= max_events:
-                    yield (
-                        "event: error\ndata: "
-                        + json.dumps(
-                            {
-                                "msg": f"SSE日志事件超过上限({max_events})，已提前终止",
-                                "code": 429,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n\n"
-                    )
-                    break
-        except ContainerServiceError as e:
-            yield f"event: error\ndata: {json.dumps({'msg': e.message, 'code': e.code}, ensure_ascii=False)}\n\n"
-        except Exception as e:
-            yield f"event: error\ndata: {json.dumps({'msg': str(e), 'code': 500}, ensure_ascii=False)}\n\n"
+        yield from iter_sse_events(
+            start_container_streaming(dto, app_config=config),
+            max_events=max_events,
+            max_line_len=max_line_len,
+            internal_error_msg=_SSE_INTERNAL_ERROR_MSG,
+            logger=logger,
+        )
 
     return Response(generate(), mimetype="text/event-stream",
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
@@ -131,9 +96,10 @@ def get_containers():
 @rate_limit(max_per_min=60)
 def get_container(container_id: str):
     """获取容器详情。"""
-    dto = {"container_id": container_id}
+    verbose = str(request.args.get("verbose", "")).strip().lower() in {"1", "true", "yes", "on"}
+    dto = {"container_id": container_id, "verbose": verbose}
     return handle_service_call(
-        lambda payload: get_container_detail(payload["container_id"]),
+        lambda payload: get_container_detail(payload["container_id"], verbose=payload["verbose"]),
         "获取容器详情成功",
         200,
         dto
@@ -146,9 +112,13 @@ def get_container(container_id: str):
 @rate_limit(max_per_min=60)
 def get_compose_project(compose_project_id: str):
     """获取 Compose 项目详情。"""
-    dto = {"compose_project_id": compose_project_id}
+    verbose = str(request.args.get("verbose", "")).strip().lower() in {"1", "true", "yes", "on"}
+    dto = {"compose_project_id": compose_project_id, "verbose": verbose}
     return handle_service_call(
-        lambda payload: get_compose_project_detail(payload["compose_project_id"]),
+        lambda payload: get_compose_project_detail(
+            payload["compose_project_id"],
+            verbose=payload["verbose"],
+        ),
         "获取Compose项目详情成功",
         200,
         dto,

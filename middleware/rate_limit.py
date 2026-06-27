@@ -95,7 +95,6 @@ def rate_limit(max_per_min: int = DEFAULT_RATE_LIMIT, window_seconds: int = RATE
             ip = get_client_ip()
             rate_key = _build_rate_limit_key(ip)
 
-            # 仅使用内存限流（已移除 Redis 支持）
             blocked = _rate_limit_with_memory(rate_key, max_per_min, window_seconds)
 
             if blocked:

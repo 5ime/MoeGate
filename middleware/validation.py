@@ -22,14 +22,22 @@ def validate_json(required=None, max_size=DEFAULT_MAX_REQUEST_SIZE):
             if content_length and content_length > max_size:
                 return error(f"请求体大小超过限制 ({content_length} > {max_size} 字节)", 413)
 
+            # chunked 或无 Content-Length 时，先缓存原始 body 再校验体积
+            body_size = len(request.get_data(cache=True) or b"")
+            if body_size > max_size:
+                return error(f"请求体大小超过限制 ({body_size} > {max_size} 字节)", 413)
+
             try:
                 data = request.get_json(silent=False)
             except Exception as e:
                 logger.warning("JSON解析失败: %s", e)
                 return error("JSON格式错误", 400)
 
-            if not data:
-                return error("JSON数据不能为空", 400)
+            if data is None:
+                return error("JSON格式错误", 400)
+
+            if not isinstance(data, dict):
+                return error("JSON数据必须为对象", 400)
 
             if required:
                 missing = [field for field in required if field not in data or data[field] is None]

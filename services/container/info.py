@@ -10,6 +10,28 @@ from core.exceptions import ContainerNotFoundError
 logger = logging.getLogger(__name__)
 
 
+def _parse_docker_env(env_list) -> Dict[str, str]:
+    parsed: Dict[str, str] = {}
+    for item in env_list or []:
+        text = str(item)
+        if "=" in text:
+            key, value = text.split("=", 1)
+            parsed[key] = value
+        else:
+            parsed[text] = ""
+    return parsed
+
+
+def sort_compose_container_details(items):
+    return sorted(
+        items,
+        key=lambda item: (
+            str(item.get("compose_service") or ""),
+            str(item.get("container_name") or ""),
+        ),
+    )
+
+
 def _add_frp_mapping_info(container_info: Dict[str, Any], app_config):
     """在容器信息中添加FRP映射地址信息
     
@@ -28,38 +50,39 @@ def _add_frp_mapping_info(container_info: Dict[str, Any], app_config):
     
     try:
         from services.frp.client import get_frp_config
-        from services.frp.parser import parse_proxy_config
-        
-        proxy_config = None
-        try:
-            config_content = get_frp_config()
-            proxy_config = parse_proxy_config(config_content, container_name)
-        except Exception as e:
-            logger.debug("解析容器 %s 的FRP配置失败: %s", container_name, e)
-        
-        if not proxy_config:
+        from services.frp.parser import list_proxies_for_container
+        from services.frp.utils import proxy_config_to_api
+
+        config_content = get_frp_config()
+        proxy_configs = list_proxies_for_container(container_name, config_content)
+        if not proxy_configs:
             logger.debug("容器 %s 的FRP代理配置未找到", container_name)
             return
-        
-        # 添加代理配置信息
-        container_info['frp_proxy_config'] = {
-            'type': proxy_config.get('type'),
-            'remotePort': proxy_config.get('remotePort'),
-            'localPort': proxy_config.get('localPort'),
-            'localIP': proxy_config.get('localIP'),
-            'customDomains': proxy_config.get('customDomains', []),
-        }
-        
-        logger.info("成功为容器 %s 添加FRP映射信息: type=%s, localPort=%s", container_name, proxy_config.get('type'), proxy_config.get('localPort'))
+
+        api_entries = [
+            proxy_config_to_api(
+                item,
+                compose_service=container_info.get("compose_service"),
+                compose_project_id=container_info.get("compose_project_id"),
+            )
+            for item in proxy_configs
+        ]
+        container_info['frp_proxy_configs'] = api_entries
+        logger.info(
+            "成功为容器 %s 添加 %d 条 FRP 映射信息",
+            container_name,
+            len(api_entries),
+        )
     except Exception as e:
         logger.debug("获取容器 %s 的FRP映射信息失败: %s", container_name, e)
 
 
-def get_container_info(container) -> Dict[str, Any]:
+def get_container_info(container, *, include_environment: bool = True) -> Dict[str, Any]:
     """获取单个容器信息
     
     Args:
         container: Docker容器对象
+        include_environment: 是否返回完整 environment；False 时仅返回 environment_keys
         
     Returns:
         Dict[str, Any]: 容器信息字典
@@ -75,6 +98,10 @@ def get_container_info(container) -> Dict[str, Any]:
             or ''
         )
 
+        labels = container.attrs.get("Config", {}).get("Labels") or {}
+        env_list = container.attrs.get("Config", {}).get("Env") or []
+        parsed_env = _parse_docker_env(env_list)
+
         container_data = {
             "container_id": container.id,
             "container_name": container_name,
@@ -82,27 +109,14 @@ def get_container_info(container) -> Dict[str, Any]:
             "status": getattr(container, 'status', 'unknown'),
             "ports": get_port_info(container),
             "start_time": started_at,
+            "compose_project_id": labels.get("moegate.compose_project_id"),
+            "compose_service": labels.get("moegate.compose_service"),
         }
-        # 无外部元数据后端，此处不补充额外运行期元数据
-        
-        # 如果开启了FRP，添加FRP代理配置
-        if default_config.ENABLE_FRP:
-            try:
-                from services.frp.client import get_frp_config
-                from services.frp.parser import parse_proxy_config
-                config_content = get_frp_config()
-                proxy_config = parse_proxy_config(config_content, container_name)
-                if proxy_config:
-                    container_data["frp_proxy_config"] = {
-                        'type': proxy_config.get('type'),
-                        'remotePort': proxy_config.get('remotePort'),
-                        'localPort': proxy_config.get('localPort'),
-                        'localIP': proxy_config.get('localIP'),
-                        'customDomains': proxy_config.get('customDomains', []),
-                    }
-            except Exception as e:
-                logger.debug("获取容器 %s 的FRP信息失败: %s", container_name, e)
-        
+        if include_environment:
+            container_data["environment"] = parsed_env
+        else:
+            container_data["environment_keys"] = sorted(parsed_env.keys())
+        _add_frp_mapping_info(container_data, default_config)
         return container_data
     except Exception:
         logger.exception("获取容器信息失败: %s", getattr(container, 'id', 'unknown'))
@@ -166,7 +180,7 @@ def list_containers() -> Dict[str, Any]:
     }
 
 
-def get_container_detail(container_id: str) -> Dict[str, Any]:
+def get_container_detail(container_id: str, *, verbose: bool = False) -> Dict[str, Any]:
     """根据容器ID获取容器详情（直接查询Docker）。"""
     client = ensure_client()
     if not client:
@@ -177,12 +191,12 @@ def get_container_detail(container_id: str) -> Dict[str, Any]:
         labels = container.attrs.get('Config', {}).get('Labels') or {}
         if labels.get('moegate.managed') != 'true':
             raise ContainerNotFoundError(container_id)
-        return get_container_info(container)
+        return get_container_info(container, include_environment=verbose)
     except NotFound:
         raise ContainerNotFoundError(container_id)
 
 
-def get_compose_project_detail(compose_project_id: str) -> Dict[str, Any]:
+def get_compose_project_detail(compose_project_id: str, *, verbose: bool = False) -> Dict[str, Any]:
     """根据 compose 项目 ID 获取项目详情。"""
     client = ensure_client()
     if not client:
@@ -200,7 +214,9 @@ def get_compose_project_detail(compose_project_id: str) -> Dict[str, Any]:
     if not containers:
         raise ContainerNotFoundError(compose_project_id)
 
-    container_details = [get_container_info(container) for container in containers]
+    container_details = [
+        get_container_info(container, include_environment=verbose) for container in containers
+    ]
     status_summary: Dict[str, int] = {}
     for item in container_details:
         status = str(item.get("status") or "unknown")

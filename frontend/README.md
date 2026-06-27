@@ -34,12 +34,14 @@ npm run build
 
 ## 环境变量
 
-见 `.env.example`。所有 `VITE_` 前缀变量会在构建时注入前端代码。
+见 [`frontend/.env.example`](./.env.example)。所有 `VITE_` 前缀变量会在构建时注入前端代码。
 
 | 变量 | 说明 |
 |------|------|
 | `VITE_DEV_API_TARGET` | 开发模式下 Vite proxy 转发的后端地址（默认 `http://127.0.0.1:8080`） |
 | `VITE_API_BASE` | 生产模式下前端请求的 API 基础地址（留空则使用 `window.location.origin`） |
+
+WebUI 认证固定为 Cookie Session 模式（登录后写入 HttpOnly Cookie），无需额外构建变量。
 
 ## 目录结构
 
@@ -49,9 +51,17 @@ src/
   main.js               # 入口
   styles.css             # Tailwind 入口 + 全局样式
   api/
-    client.js            # API 客户端（认证、请求、错误处理）
+    client.js            # API 客户端（认证、401 处理、请求封装）
   stores/
-    appStore.js          # 全局响应式状态
+    state.js             # 全局 reactive 状态
+    authStore.js         # 登录 / Session
+    uiStore.js           # UI 状态（详情面板、消息等）
+    containersStore.js   # 容器与 Compose
+    imagesStore.js       # 镜像
+    networksStore.js     # 网络
+    frpStore.js          # FRP
+    systemStore.js       # 系统状态与 Metrics
+    settingsStore.js     # 偏好设置 API
   composables/           # 可复用组合函数
   components/
     tabs/                # 各 Tab 页面（容器/创建/镜像/网络/FRP/系统）

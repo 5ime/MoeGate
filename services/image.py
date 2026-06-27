@@ -196,7 +196,7 @@ def list_images() -> Dict[str, Any]:
         raise ContainerServiceError(f"获取受管镜像列表失败: {extract_docker_error_message(exc)}", 500)
 
 
-def get_image_detail(image_ref: str) -> Dict[str, Any]:
+def get_image_detail(image_ref: str, *, verbose: bool = False) -> Dict[str, Any]:
     ref = str(image_ref or "").strip()
     if not ref:
         raise ValidationError("镜像标识不能为空")
@@ -214,7 +214,8 @@ def get_image_detail(image_ref: str) -> Dict[str, Any]:
             usage_refs=usage_refs.get(image.id, []),
             registry_record=registry_records.get(image.id),
         )
-        detail["attrs"] = getattr(image, "attrs", None) or {}
+        if verbose:
+            detail["attrs"] = getattr(image, "attrs", None) or {}
         return detail
     except docker.errors.ImageNotFound:
         resolved_id = resolve_registered_image_ref(ref)
@@ -229,7 +230,8 @@ def get_image_detail(image_ref: str) -> Dict[str, Any]:
                     usage_refs=usage_refs.get(image.id, []),
                     registry_record=registry_records.get(image.id),
                 )
-                detail["attrs"] = getattr(image, "attrs", None) or {}
+                if verbose:
+                    detail["attrs"] = getattr(image, "attrs", None) or {}
                 return detail
             except docker.errors.ImageNotFound:
                 unregister_managed_image(resolved_id)

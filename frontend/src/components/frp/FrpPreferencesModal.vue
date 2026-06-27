@@ -14,6 +14,7 @@ const props = defineProps({
   adminPort: { type: String, default: '7400' },
   adminUser: { type: String, default: '' },
   adminPassword: { type: String, default: '' },
+  adminPasswordSet: { type: Boolean, default: false },
   useDomain: { type: Boolean, default: false },
   domainSuffix: { type: String, default: '' },
 });
@@ -128,7 +129,7 @@ function updateBool(field, event) {
               :value="adminPassword"
               type="password"
               :disabled="saving"
-              placeholder="可选"
+              :placeholder="adminPasswordSet ? '已配置（输入新密码可覆盖）' : '可选'"
               class="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 outline-none transition focus:border-slate-400 disabled:cursor-not-allowed disabled:opacity-55"
               @input="updateField('adminPassword', $event)"
             />

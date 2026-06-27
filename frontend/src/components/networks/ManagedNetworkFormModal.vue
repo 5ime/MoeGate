@@ -122,7 +122,7 @@ function updateBool(field, event) {
       <SectionCard>
         <KeyValueLinesEditor
           :model-value="labelsText"
-          :rows="8"
+          :rows="3"
           placeholder="例如&#10;env=test&#10;owner=lab"
           helper-text="系统会自动维护 moegate.managed 和可选的 moegate.compose_project_id，无需手动重复填写。"
           @update:modelValue="emit('update:labelsText', $event)"

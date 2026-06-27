@@ -1,0 +1,14 @@
+bindPort = 7000
+bindAddr = "0.0.0.0"
+
+[auth]
+method = "token"
+token = "your-strong-random-token"
+
+[[allowPorts]]
+start = 20000
+end = 30000
+
+[log]
+level = "info"
+maxDays = 3

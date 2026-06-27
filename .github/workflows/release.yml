@@ -1,0 +1,134 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "版本标签，需与 core/version.py 一致 (如 v0.2.0)"
+        required: true
+        type: string
+      publish_image:
+        description: "发布 Docker 镜像到 GHCR"
+        type: boolean
+        default: false
+      create_release:
+        description: "创建 GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install and build frontend
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+  publish:
+    runs-on: ubuntu-latest
+    needs: build
+    if: inputs.publish_image || inputs.create_release
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+
+      - name: Resolve release tag
+        id: release
+        run: |
+          TAG="${{ inputs.tag }}"
+          if [[ ! "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$ ]]; then
+            echo "Invalid tag format: $TAG (expected vX.Y.Z)"
+            exit 1
+          fi
+          VERSION="${TAG#v}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Verify version matches core/version.py
+        run: |
+          PY_VERSION=$(python -c "from core.version import VERSION; print(VERSION)")
+          if [ "${{ steps.release.outputs.version }}" != "$PY_VERSION" ]; then
+            echo "Tag version (${{ steps.release.outputs.version }}) does not match core/version.py ($PY_VERSION)"
+            exit 1
+          fi
+
+      - name: Set up Docker Buildx
+        if: inputs.publish_image
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: inputs.publish_image
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image name
+        id: image
+        run: echo "name=${REGISTRY}/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push Docker image
+        if: inputs.publish_image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}
+            ${{ steps.image.outputs.name }}:${{ steps.release.outputs.tag }}
+            ${{ steps.image.outputs.name }}:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify image excludes test files
+        if: inputs.publish_image
+        run: |
+          IMAGE="${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}"
+          for path in tests frontend/e2e requirements-dev.txt; do
+            if docker run --rm --entrypoint test "$IMAGE" ! -e "/app/$path"; then
+              echo "OK: /app/$path not in image"
+            else
+              echo "FAIL: /app/$path found in image"
+              exit 1
+            fi
+          done
+
+      - name: Create GitHub Release
+        if: inputs.create_release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.release.outputs.tag }}
+          name: MoeGate ${{ steps.release.outputs.tag }}
+          generate_release_notes: true
+          body: |
+            ## Docker
+
+            ```bash
+            docker pull ${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}
+            ```
+
+            或在 `docker-compose.yml` 中将 `image` 改为：
+
+            ```yaml
+            image: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}
+            ```

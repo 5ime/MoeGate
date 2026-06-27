@@ -1,0 +1,32 @@
+services:
+  moegate:
+    environment:
+      FRP_ADMIN_IP: frpc
+      FRP_SERVER_ADDR: frps
+      FRP_LOCAL_IP: host.docker.internal
+    depends_on:
+      frpc:
+        condition: service_started
+
+  frps:
+    image: snowdreamtech/frps:0.58.0
+    container_name: moegate-frps
+    restart: unless-stopped
+    volumes:
+      - ./deploy/compose/frps.toml:/etc/frp/frps.toml:ro
+    ports:
+      - "${FRP_SERVER_PORT:-7000}:7000"
+
+  frpc:
+    image: snowdreamtech/frpc:0.58.0
+    container_name: moegate-frpc
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./frpc.toml:/etc/frp/frpc.toml
+    ports:
+      - "${FRP_ADMIN_PORT:-7400}:7400"
+    depends_on:
+      frps:
+        condition: service_started

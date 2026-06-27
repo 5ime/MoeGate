@@ -9,7 +9,7 @@ __pycache__/
 venv/
 ENV/
 env/
-.venv
+.venv*/
 
 # IDE
 .vscode/
@@ -23,10 +23,14 @@ env/
 .env
 .env.local
 .env.*.local
+docker-compose.override.yml
+frpc.toml
+frps.toml
 
 # Logs
 logs/
 *.log
+tests/*
 
 # Temporary files
 *.tmp
