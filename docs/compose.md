@@ -13,10 +13,10 @@ services:
 
 ## 规则说明
 
-- 创建时传入的 `env` 会作为全局变量合并进各 service
+- 创建时传入的 `env` 仅注入各 service 在 `environment` / `command` 中实际引用的 `${VAR}`，不会把其它服务的变量一并带入
 - compose 文件中已写明的变量优先保留
 - 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
-- **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag
+- **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
 
 ## 自定义变量名
 
