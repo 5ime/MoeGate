@@ -56,6 +56,12 @@ def _get_csv_env(key: str, default: Optional[str] = None) -> list:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+def _validate_production_secret(name: str, value: Optional[str]) -> None:
+    secret = str(value or "")
+    if len(secret) < 32:
+        raise ValueError(f"生产环境 {name} 长度不足 32 字符，请使用安全随机生成的密钥")
+
+
 @dataclass
 class AppConfig:
     """应用配置类，从环境变量加载并在初始化时验证。"""
@@ -314,10 +320,9 @@ class AppConfig:
                 raise ValueError(
                     "生产环境启用 TRUST_PROXY_HEADERS 时必须配置 TRUSTED_PROXY_IPS"
                 )
-            if len(str(self.API_KEY or "")) < 32:
-                raise ValueError(
-                    "生产环境 API_KEY 长度不足 32 字符，请使用高熵随机密钥"
-                )
+            _validate_production_secret("API_KEY", self.API_KEY)
+            if self.ENABLE_API_SESSION_COOKIE:
+                _validate_production_secret("API_SESSION_SECRET", self.API_SESSION_SECRET)
 
         if self.EXPIRE_RECONCILE_INTERVAL_SEC <= 0:
             raise ValueError("EXPIRE_RECONCILE_INTERVAL_SEC 必须大于 0")
