@@ -13,11 +13,11 @@ services:
     environment:
       API_HOST: 0.0.0.0
       API_DEBUG: "false"
-      ALLOWED_BASE_DIR: /data/containers
+      ALLOWED_BASE_DIR: ${ALLOWED_BASE_DIR:-/data/containers}
       SHUTDOWN_DESTROY_CONTAINERS: "false"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
-      - moegate-data:/data/containers
+      - moegate-data:${ALLOWED_BASE_DIR:-/data/containers}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
