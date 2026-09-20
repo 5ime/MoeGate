@@ -283,6 +283,8 @@ def _remove_compose_networks(compose_project_id: str, network_names=None):
 
             network_name = getattr(network, "name", None)
             try:
+                if (getattr(network, "attrs", None) or {}).get("Containers"):
+                    continue
                 network.remove()
                 if network_name:
                     removed_networks.append(network_name)
@@ -398,3 +400,6 @@ def destroy_container(container_id: str):
 
     if not had_error and not compose_project_id:
         logger.info("容器 %s 销毁完成", container_id)
+    elif not had_error:
+        _remove_compose_networks(compose_project_id)
+        logger.info("Compose 容器 %s 销毁完成，已检查项目网络清理", container_id)
