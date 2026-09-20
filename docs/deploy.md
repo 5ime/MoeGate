@@ -28,7 +28,7 @@ python app.py
 
 ```bash
 cp env.example .env
-# 编辑 .env：至少设置 API_KEY；容器内 ALLOWED_BASE_DIR 默认为 /data/containers
+# 编辑 .env：至少设置 API_KEY；ALLOWED_BASE_DIR 为容器内绝对路径
 
 docker compose up -d --build
 ```
@@ -38,7 +38,7 @@ docker compose up -d --build
 - 镜像多阶段构建：Node 构建 WebUI → Python slim + gunicorn
 - 容器内以非 root 用户 `moegate` 运行；entrypoint 会将该用户加入 `docker.sock` 所在组
 - 挂载 `/var/run/docker.sock` 以管理宿主机容器（等效 root，见 [SECURITY.md](SECURITY.md#docker-socketh1)）
-- 数据目录 `moegate-data` 命名卷映射到 `/data/containers`（构建白名单根目录）；默认由 Docker 管理卷，无需本机路径
+- 数据目录 `moegate-data` 命名卷映射到 `ALLOWED_BASE_DIR`（构建白名单根目录）；默认由 Docker 管理卷，无需本机路径
 - 若需 bind 到宿主机目录，可叠加 `docker-compose.override.yml` 或参考下方示例
 - 健康检查：`GET /healthz`
 - 默认 `SHUTDOWN_DESTROY_CONTAINERS=false`，重启 MoeGate 不会删除受管容器
@@ -52,7 +52,7 @@ docker compose up -d --build
 services:
   moegate:
     volumes:
-      - /path/on/host/containers:/data/containers
+      - /path/on/host/containers:${ALLOWED_BASE_DIR:-/data/containers}
 ```
 
 请将 `/path/on/host/containers` 替换为实际路径，并确保目录存在且容器进程可写。
@@ -91,9 +91,9 @@ gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:8080 --timeout 120 app:app
 
 | 变量 | 必填 | 说明 |
 |------|------|------|
-| `API_KEY` | **是** | API 密钥，不可用默认占位值（生产须 ≥32 字符） |
-| `API_SESSION_SECRET` | **是**（Cookie 登录） | Session 签名密钥，必须与 `API_KEY` 不同 |
-| `ALLOWED_BASE_DIR` | **是** | Dockerfile/Compose 构建路径白名单根目录 |
+| `API_KEY` | **是** | API 密钥，不可用默认占位值（生产须 ≥32 字符；请安全随机生成） |
+| `API_SESSION_SECRET` | **是**（Cookie 登录） | Session 签名密钥，必须与 `API_KEY` 不同（生产须 ≥32 字符） |
+| `ALLOWED_BASE_DIR` | **是** | Dockerfile/Compose 构建路径白名单根目录；Docker 部署时为容器内绝对路径 |
 | `API_PORT` | | 监听端口（默认 `8080`；Docker 映射 `${API_PORT:-8080}:8080`） |
 | `ENABLE_WEBUI` | | 是否托管 WebUI（默认 `True`） |
 | `WEBUI_BASIC_AUTH_USER` / `WEBUI_BASIC_AUTH_PASSWORD` | | 两者均配置时，WebUI 启用 Basic 认证 |
