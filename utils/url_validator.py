@@ -3,7 +3,7 @@
 import ipaddress
 import json as json_lib
 import socket
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import urllib3
@@ -30,7 +30,7 @@ def _is_blocked_ip(ip_str: str) -> bool:
     )
 
 
-def validate_webhook_url(url: str) -> Tuple[bool, str]:
+def validate_webhook_url(url: str, *, _resolved_ips: Optional[List[str]] = None) -> Tuple[bool, str]:
     """校验 webhook URL，禁止指向内网/本地/元数据等地址。"""
     text = (url or "").strip()
     if not text:
@@ -56,22 +56,25 @@ def validate_webhook_url(url: str) -> Tuple[bool, str]:
     except ValueError:
         pass
 
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    try:
-        results = socket.getaddrinfo(
-            host,
-            port,
-            type=socket.SOCK_STREAM,
-            proto=socket.IPPROTO_TCP,
-        )
-    except socket.gaierror:
+    if _resolved_ips is None:
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        try:
+            results = socket.getaddrinfo(
+                host,
+                port,
+                type=socket.SOCK_STREAM,
+                proto=socket.IPPROTO_TCP,
+            )
+        except socket.gaierror:
+            return False, "webhook_url 主机名无法解析"
+        resolved_ips = [item[4][0] for item in results]
+    else:
+        resolved_ips = _resolved_ips
+
+    if not resolved_ips:
         return False, "webhook_url 主机名无法解析"
 
-    if not results:
-        return False, "webhook_url 主机名无法解析"
-
-    for item in results:
-        resolved_ip = item[4][0]
+    for resolved_ip in resolved_ips:
         if _is_blocked_ip(resolved_ip):
             return False, "webhook_url 解析到不允许的地址"
 
@@ -80,14 +83,15 @@ def validate_webhook_url(url: str) -> Tuple[bool, str]:
 
 def resolve_webhook_ips(url: str) -> Tuple[bool, str, List[str]]:
     """解析 webhook 主机名对应的 IP 列表（需先通过 validate_webhook_url 同等规则）。"""
-    ok, reason = validate_webhook_url(url)
-    if not ok:
-        return False, reason, []
-
     parsed = urlparse((url or "").strip())
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False, "webhook_url 无效", []
+
     host = parsed.hostname.lower().rstrip(".")
     try:
-        return True, "", [str(ipaddress.ip_address(host))]
+        ips = [str(ipaddress.ip_address(host))]
+        ok, reason = validate_webhook_url(url, _resolved_ips=ips)
+        return (True, "", ips) if ok else (False, reason, [])
     except ValueError:
         pass
 
@@ -109,6 +113,9 @@ def resolve_webhook_ips(url: str) -> Tuple[bool, str, List[str]]:
             ips.append(resolved_ip)
     if not ips:
         return False, "webhook_url 主机名无法解析", []
+    ok, reason = validate_webhook_url(url, _resolved_ips=ips)
+    if not ok:
+        return False, reason, []
     return True, "", ips
 
 
@@ -117,10 +124,6 @@ def post_webhook_json(url: str, json_body: dict, timeout: float) -> urllib3.HTTP
     ok, reason, ips = resolve_webhook_ips(url)
     if not ok or not ips:
         raise ValueError(reason or "webhook_url 无效")
-
-    ok_repeat, reason_repeat, ips_repeat = resolve_webhook_ips(url)
-    if not ok_repeat or set(ips) != set(ips_repeat):
-        raise ValueError(reason_repeat or "webhook DNS 解析结果不一致")
 
     parsed = urlparse((url or "").strip())
     hostname = parsed.hostname

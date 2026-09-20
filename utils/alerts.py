@@ -7,7 +7,7 @@ from typing import Dict, Any
 
 from config import config
 from infra.docker import ensure_client
-from utils.url_validator import post_webhook_json, validate_webhook_url
+from utils.url_validator import post_webhook_json
 
 logger = logging.getLogger(__name__)
 
@@ -255,11 +255,6 @@ def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
 
     url = str(config.ALERT_WEBHOOK_URL or "").strip()
     if not url:
-        return False
-
-    ok, reason = validate_webhook_url(url)
-    if not ok:
-        logger.warning("告警 webhook URL 校验失败，已拒绝发送: %s", reason)
         return False
 
     payload = dict(payload or {})
