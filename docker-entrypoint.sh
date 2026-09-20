@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
 
+if [ "$(id -u)" = "0" ]; then
+  base_dir="${ALLOWED_BASE_DIR:-/data/containers}"
+  mkdir -p "$base_dir/.moegate"
+  chown moegate:moegate "$base_dir/.moegate"
+fi
+
 # 启动时读取挂载的 docker.sock 组 GID，自动加入 moegate 用户，避免手动配置 DOCKER_GID
 if [ "$(id -u)" = "0" ] && [ -S /var/run/docker.sock ]; then
   sock_gid="$(stat -c '%g' /var/run/docker.sock)"
