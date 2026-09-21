@@ -80,20 +80,29 @@ def resolve_compose_service_env(
 ) -> Dict[str, str]:
     """合并 compose / 全局环境变量，并解析 ${VAR}。
 
-    全局 env 仅注入本 service 在 environment / command 中引用的变量，
-    避免多 service 场景下其它服务的 FLAG 泄漏进本容器。
+    - 单 service：API 传入的全局 env 完整注入（与镜像/Dockerfile 单容器一致），
+      确保调用方传入的 FLAG 等变量一定进入容器。
+    - 多 service：仅注入本 service 在 environment / command 中引用的变量，
+      避免其它服务的 FLAG 泄漏；共享 FLAG 会被丢弃并由各 service 各自生成。
     """
     merged_env = parse_service_environment(service.get("environment"))
     referenced_vars = collect_service_var_references(service)
 
-    filtered_global = {
+    raw_global = {
         str(key): ("" if value is None else str(value))
         for key, value in dict(global_env or {}).items()
-        if str(key) in referenced_vars
     }
-    # 多 service 时丢弃共享 FLAG，让各 service 各自生成独立值
-    if multi_service and "FLAG" in filtered_global and "FLAG" in referenced_vars:
-        filtered_global.pop("FLAG", None)
+    if multi_service:
+        filtered_global = {
+            key: value for key, value in raw_global.items() if key in referenced_vars
+        }
+        # 多 service 时丢弃共享 FLAG，让各 service 各自生成独立值
+        if "FLAG" in filtered_global and "FLAG" in referenced_vars:
+            filtered_global.pop("FLAG", None)
+    else:
+        # 单 service：完整透传，即使 compose 未写 ${FLAG}
+        filtered_global = raw_global
+
     if filtered_global:
         merged_env.update(filtered_global)
 
@@ -101,7 +110,6 @@ def resolve_compose_service_env(
         current = merged_env.get(var_name, "")
         if var_name == "FLAG" and (not current or f"${{{var_name}}}" in current):
             merged_env[var_name] = generate_service_flag()
-
     context = {str(key): str(value) for key, value in merged_env.items()}
     for _ in range(10):
         changed = False
