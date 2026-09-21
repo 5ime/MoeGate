@@ -13,10 +13,11 @@ services:
 
 ## 规则说明
 
-- 创建时传入的 `env` 仅注入各 service 在 `environment` / `command` 中实际引用的 `${VAR}`，不会把其它服务的变量一并带入
+- **单 service / 镜像 / Dockerfile**：API 传入的 `env` **完整注入**容器（即使 compose 未写 `${FLAG}`）。上游单 FLAG 场景应传 `env.FLAG`，MoeGate 原样写入。
+- **多 service**：`env` 仅注入各 service 在 `environment` / `command` 中实际引用的 `${VAR}`，避免其它服务的变量泄漏
 - compose 文件中已写明的变量优先保留
 - 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
-- **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
+- **多 service 项目里，每个 service 各自生成独立 FLAG**（即便 API 传了共享 `FLAG` 也会丢弃后各自生成）；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
 
 ## 自定义变量名
 

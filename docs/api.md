@@ -217,7 +217,12 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 - `port_mappings` 与 `min_port` / `max_port` **只能二选一**
 - **多 service Compose** 项目会忽略 API 传入的 `port_mappings`，各 service 端口由 compose 文件中的 `ports` 定义并由 MoeGate 自动分配
 
-`env` 会传入 Compose 各 service，并与 compose 文件中的 `environment` 合并。Compose 里 `${VAR}` 占位符会被解析；未赋值且被引用的变量（如 `FLAG`）会自动生成唯一值。多 service 场景下，每个 service 各自获得独立的 `FLAG`。
+`env` 注入规则：
+
+- **镜像 / Dockerfile / 单 service Compose**：完整透传，例如 `{"FLAG": "flag{...}"}` 一定进入容器
+- **多 service Compose**：仅注入各 service 实际引用的 `${VAR}`；未赋值的 `FLAG` 引用会各自生成独立值（API 传入的共享 `FLAG` 会被忽略）
+
+Compose 里 `${VAR}` 占位符会被解析。详见 [compose.md](compose.md)。
 
 Compose 变量替换机制详见 [compose.md](compose.md)。
 

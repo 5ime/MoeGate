@@ -114,7 +114,8 @@ services:
     command: ["/bin/sh", "-c", "echo '${FLAG}' > /flag && nginx -g 'daemon off;'"]
 ```
 
-- 创建时传入的 `env` 仅注入各 service 实际引用的 `${VAR}`，不会把其它服务的变量一并带入
+- **单 service / 镜像 / Dockerfile**：API 传入的 `env` 完整注入（单 FLAG 应传 `env.FLAG`）
+- **多 service**：仅注入各 service 实际引用的 `${VAR}`，避免跨服务泄漏
 - compose 文件中已写明的变量优先保留
 - 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
 - **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
