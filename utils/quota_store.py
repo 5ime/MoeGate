@@ -40,6 +40,12 @@ class SharedQuotaStore:
                     import msvcrt
 
                     msvcrt.locking(lock_fd, msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+
+                    fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            except Exception as exc:
+                logger.warning("释放配额文件锁失败: %s", exc)
             finally:
                 os.close(lock_fd)
 
