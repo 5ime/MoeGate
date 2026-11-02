@@ -60,8 +60,8 @@ jobs:
         run: |
           # 生产模式会拒绝含 test/ci/secret 等示例特征词的密钥，
           # 这里使用固定但无弱标记的 32+ 字符值，仅用于 CI 冒烟。
-          CI_API_KEY="gRI4yDeD8Fp1UthperA0R3WXy1tosD2pwPybS7FiLNA"
-          CI_SESSION_SECRET="RkUOJ8UaaXlflg3mhw8vSsUvwdwYU96a4aTu0PbZNEk"
+          CI_API_KEY="Zk8vQw3nXr7LpT2yHb9sMd4fGj6aEu5N"
+          CI_SESSION_SECRET="Rv5bKx9wQm2nLt7yPd3sHf8gJa4eUz6C"
           docker run -d --name moegate-ci \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -e API_KEY="$CI_API_KEY" \
