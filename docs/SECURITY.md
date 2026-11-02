@@ -55,6 +55,11 @@ Cookie 模式下，变更类 API（POST/PUT/PATCH/DELETE）启用 **Double-Submi
 
 SameSite=Lax 提供基础跨站防护；CSRF token 进一步保护同站恶意页面发起的变更请求。
 
+**会话吊销**：Session Cookie 是无状态签名串，只清浏览器 Cookie 无法让已泄露的 Cookie 失效。
+每个会话带 `sid`，`/api/v1/auth/logout` 与 `DELETE /api/v1/auth/session` 在服务端吊销当前会话，
+`POST /api/v1/auth/logout-all` 作废全部已签发会话（轮换 API Key 后应立即调用）。吊销表仅在本进程内，
+多实例需逐副本调用或重启。
+
 ### 单 Key 无 RBAC（H2）
 
 所有认证请求共享同一权限。变更类 API 调用会写入 `moegate.audit` 日志（来源 IP、方法、路径、认证方式），便于事后追溯，但**无法**按用户单独撤销或降级。
@@ -105,6 +110,12 @@ MoeGate 使用 **Docker SDK 编排**（非 `docker compose` CLI），在保留�
 - API Key 恒定时间比较、路径白名单、受管容器标签隔离
 - 生产模式（`API_DEBUG=false`）路径校验错误不返回绝对路径
 
+### Docker 瞬时错误重试
+
+创建容器、启动容器、创建网络、启动取证 sidecar 均经 `infra/docker_retry.docker_call` 调用：
+遇到 408/429/5xx 或连接类错误按指数退避最多重试 3 次；4xx（镜像不存在、名字冲突）、
+网络地址池耗尽等确定性错误不重试，直接交给上层按业务逻辑处理。
+
 ### 限流与多实例（M7）
 
 IP 限流为**单进程内存**实现（`middleware/rate_limit.py`）。多实例部署时限流计数不共享，需在前置反代或 WAF 层做分布式限流。详见 [deploy.md](deploy.md#多实例限制)。
@@ -133,11 +144,15 @@ IP 限流为**单进程内存**实现（`middleware/rate_limit.py`）。多实�
 
 默认启用 `LOCK_RUNTIME_QUOTA_TO_BOOT=true`：运行态 API **不能**将 `MAX_CONTAINERS` / `MAX_RENEW_TIMES` 提高到超过 `.env` 启动值，防止临时扩大资源配额。
 
+FRP 设置的 `server_addr` / `admin_ip` 只接受**主机名或 IP**：不接受 URL、路径、端口或带凭据的写法。
+FRP 管理地址会带上管理员账号密码发起请求，若允许填成任意 URL，等于把口令交给第三方主机。
+
 ## 推荐生产加固（第二阶段）
 
 | 措施 | 配置 / 文件 | 说明 |
 |------|-------------|------|
 | Docker Socket 代理 | `deploy/compose/socket-proxy.example.yml` | MoeGate 经 `docker-socket-proxy` 访问 Docker，禁用 EXEC/SWARM 等高危 API |
+| Compose 策略收紧 | `COMPOSE_POLICY=strict` | 默认 `ctf` 放行 `privileged` 等字段（仅告警），strict 直接拒绝 |
 | 可信反代 IP 白名单 | `TRUSTED_PROXY_IPS` | 与 `TRUST_PROXY_HEADERS=true` 配合；仅反代 IP 命中时才读 `X-Forwarded-For` |
 | 认证失败封禁 | `AUTH_FAILURE_LIMIT_PER_MIN` | 同一 IP 每分钟认证失败超阈值后返回 429 |
 | 运行态配额锁定 | `LOCK_RUNTIME_QUOTA_TO_BOOT=true` | 禁止通过 WebUI/API 临时抬高容器上限 |

@@ -57,12 +57,12 @@ MoeGate 通过 **Docker SDK 直接创建容器**（非 `docker compose` CLI）�
 | `ports` | 宿主机端口由 MoeGate 自动分配（落在 `MIN_PORT`–`MAX_PORT`）；YAML 中勿写固定 host port |
 | `command` | 启动命令，支持 `${VAR}` 替换 |
 | `environment` | 环境变量，支持 `${VAR}` 替换与全局 `env` 合并 |
-| `networks` | 受管 Compose 网络与子网分配 |
+| `networks` | 受管 Compose 网络与子网分配；`external: true` 只允许引用本平台创建的网络 |
 | `volumes` | **仅 bind mount**；宿主机路径须在 `ALLOWED_BASE_DIR` 内，禁止挂载 Docker Socket 等敏感路径 |
-| `privileged` | 特权容器（`COMPOSE_POLICY=strict` 时拒绝） |
-| `cap_add` / `cap_drop` | Linux capabilities（strict 模式拒绝部分高危 cap） |
+| `privileged` | 特权容器（`COMPOSE_POLICY=strict` 时拒绝；`ctf` 放行但会在 `compose_warnings` 提示） |
+| `cap_add` / `cap_drop` | Linux capabilities（strict 模式拒绝高危 cap；ctf 模式对高危 cap 给出提示） |
 | `depends_on` | 仅决定**启动顺序**，不等待 healthcheck |
-| API `resource_limits` | 内存/CPU 限制（映射到容器创建参数） |
+| API `resource_limits` | 内存/CPU 限制（映射到容器创建参数）；单容器上限 64G / 64 核 |
 
 ### 永久不支持的字段
 
@@ -80,11 +80,14 @@ MoeGate 通过 **Docker SDK 直接创建容器**（非 `docker compose` CLI）�
 
 **named volume**（如 `mydata:/var/lib/mysql`）不受支持，请改用 bind mount。
 
+`networks` 中的 `external: true` 会被校验：目标网络必须带 `moegate.managed=true` 标签（即由 MoeGate 创建），
+否则拒绝启动——避免靶机被接进宿主机上任意既有网络。
+
 ### 配置项
 
 | 环境变量 | 取值 | 说明 |
 |----------|------|------|
-| `COMPOSE_POLICY` | `ctf`（默认） / `strict` | strict 拒绝 privileged、敏感 mount、高危 cap 等 |
+| `COMPOSE_POLICY` | `ctf`（默认） / `strict` | strict 拒绝 privileged、敏感 mount、高危 cap 等；ctf 放行但在响应 `compose_warnings` 中提示 |
 | `COMPOSE_UNSUPPORTED` | `warn`（默认） / `error` | 对永久不支持字段的处理方式 |
 
 生产环境建议：`COMPOSE_POLICY=strict` + `COMPOSE_UNSUPPORTED=error`。

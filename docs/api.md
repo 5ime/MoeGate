@@ -16,8 +16,14 @@
 | 方法 | 路径 | 说明 |
 |------|------|------|
 | `POST` | `/api/v1/auth/login` | 使用 `{"api_key": "..."}` 登录，写入 Session Cookie |
-| `POST` | `/api/v1/auth/logout` | 退出登录，清除 Session |
+| `POST` | `/api/v1/auth/logout` | 退出登录：清 Cookie **并在服务端吊销该会话** |
+| `DELETE` | `/api/v1/auth/session` | 吊销当前会话（等价带鉴权的 logout） |
+| `POST` | `/api/v1/auth/logout-all` | 吊销全部已签发会话（需鉴权；轮换 API Key 后使用） |
 | `GET` | `/api/v1/auth/session` | 查询当前登录状态 |
+
+Session Cookie 是无状态签名串，仅清浏览器 Cookie **不会**让已泄露的 Cookie 失效。
+`logout` / `DELETE /auth/session` 会在服务端吊销当前会话，`logout-all` 直接作废所有已签发会话。
+吊销记录仅在当前进程内生效，多实例部署需对每个副本调用 `logout-all`（或重启）。
 
 Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSRF-Token` 请求头（与 `moegate_csrf` Cookie 值一致）。使用 `X-API-Key` 的脚本调用不受 CSRF 约束。详见 [SECURITY.md](SECURITY.md)。
 
@@ -88,6 +94,22 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 **详情查询**：`GET /api/v1/containers/<id>`、`GET /api/v1/containers/project/<id>`、`GET /api/v1/images/detail/<ref>` 支持 `?verbose=true`，返回完整 `environment` / Docker `attrs`；默认仅返回 `environment_keys` 等摘要字段。
 
 **删除任务状态**：`destroy-status` 返回 `status`（`pending` / `running` / `success` / `failed` / `not_found`）及时间戳字段。
+
+### 流量取证
+
+需 `ENABLE_TRAFFIC_CAPTURE=true`，详见 [traffic-capture.md](traffic-capture.md)。
+
+创建容器时可用请求体参数 `traffic_capture`（`true` / `false`，不传走 `TRAFFIC_CAPTURE_DEFAULT`）决定该靶机是否抓包；该值写入标签 `moegate.traffic_capture`，重启与 reconcile 都以标签为准。
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/api/v1/containers/<id>/traffic` | 取证状态（`policy` / `requested` / `running`）+ pcap 文件列表 |
+| `GET` | `/api/v1/containers/<id>/traffic/summary` | pcap 摘要，支持 `?max_packets=50000&max_http=200` |
+| `GET` | `/api/v1/containers/<id>/traffic/<filename>` | 下载单个 pcap（`application/vnd.tcpdump.pcap`） |
+| `POST` | `/api/v1/containers/<id>/traffic/start` | 手动开启（可强制覆盖 `traffic_capture=false`，仅本次 sidecar 有效） |
+| `POST` | `/api/v1/containers/<id>/traffic/stop` | 停止抓包，已落盘文件保留 |
+
+`summary` 的 `signals` 字段给出可复核的事实统计（工具型 UA、请求量、节奏、峰值）：`automation_user_agents`、`automation_clients`、`min_median_request_interval_ms`、`peak_requests_per_minute`。
 
 ## 镜像
 
