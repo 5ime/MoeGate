@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-ARG NODE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine
-ARG PYTHON_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.11-slim
+ARG NODE_IMAGE=node:20-alpine
+ARG PYTHON_IMAGE=python:3.11-slim
 
 FROM ${NODE_IMAGE} AS frontend
 WORKDIR /build/frontend

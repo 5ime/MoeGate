@@ -2,7 +2,13 @@
 # 详见 docs/deploy.md#docker-socket-proxyh1-缓解
 services:
   moegate:
-    build: .
+    build:
+      context: .
+      # 本机/国内环境默认走镜像加速；CI 的 `docker build .` 若不传 args，
+      # 会使用 Dockerfile 里的上游镜像默认值，避免依赖特定镜像站。
+      args:
+        NODE_IMAGE: ${NODE_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine}
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.11-slim}
     image: moegate:latest
     container_name: moegate
     restart: unless-stopped
