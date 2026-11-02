@@ -3,7 +3,7 @@
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Dict, Any
+from typing import Dict, Any, Optional, Sequence
 
 from config import config
 from infra.docker import ensure_client
@@ -88,7 +88,15 @@ def _format_feishu_text(event_type: str, payload: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _build_feishu_card(event_type: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+def _build_feishu_card(
+    event_type: str,
+    payload: Dict[str, Any],
+    *,
+    title: str = "MoeGate 告警",
+    template: str = "red",
+    extra_fields: Optional[Sequence[Dict[str, str]]] = None,
+    include_snapshot: bool = True,
+) -> Dict[str, Any]:
     """构造飞书 interactive 卡片消息"""
     now = datetime.now(timezone.utc).astimezone()
     snapshot = (payload or {}).get("snapshot") if isinstance(payload, dict) else None
@@ -105,16 +113,28 @@ def _build_feishu_card(event_type: str, payload: Dict[str, Any]) -> Dict[str, An
 
     fields = [
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**时间**\n{now.strftime('%Y-%m-%d %H:%M:%S %z')}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**CPU**\n{_val(sys_s.get('cpu_usage'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**内存**\n{_val(sys_s.get('memory_usage'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**核心/总内存**\n{_val(sys_s.get('cpu_cores'))} / {_val(sys_s.get('memory_total'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**Docker 版本**\n{_val(docker_s.get('docker_version'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**总容器数/运行上限**\n{_val(docker_s.get('containers_total'))} / {_val(docker_s.get('max_containers'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**受管容器**\n{_val(docker_s.get('managed_total'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**独立容器数**\n{_val(docker_s.get('standalone_managed'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**Compose/Project**\n{_val(docker_s.get('compose_managed'))} / {_val(docker_s.get('compose_projects'))}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**FRP**\n{frp_enabled_txt}，代理 {_val(frp_s.get('proxies_count'))}"}},
     ]
+    if include_snapshot:
+        fields.extend([
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**CPU**\n{_val(sys_s.get('cpu_usage'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**内存**\n{_val(sys_s.get('memory_usage'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**核心/总内存**\n{_val(sys_s.get('cpu_cores'))} / {_val(sys_s.get('memory_total'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**Docker 版本**\n{_val(docker_s.get('docker_version'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**总容器数/运行上限**\n{_val(docker_s.get('containers_total'))} / {_val(docker_s.get('max_containers'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**受管容器**\n{_val(docker_s.get('managed_total'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**独立容器数**\n{_val(docker_s.get('standalone_managed'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**Compose/Project**\n{_val(docker_s.get('compose_managed'))} / {_val(docker_s.get('compose_projects'))}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**FRP**\n{frp_enabled_txt}，代理 {_val(frp_s.get('proxies_count'))}"}},
+        ])
+
+    for item in extra_fields or []:
+        label = str(item.get("label") or "").strip()
+        if not label:
+            continue
+        fields.append({
+            "is_short": True,
+            "text": {"tag": "lark_md", "content": f"**{label}**\n{_val(item.get('value'))}"},
+        })
 
     detail_lines = []
     for k, label in [
@@ -144,8 +164,8 @@ def _build_feishu_card(event_type: str, payload: Dict[str, Any]) -> Dict[str, An
     return {
         "config": {"wide_screen_mode": True},
         "header": {
-            "template": "red",
-            "title": {"tag": "plain_text", "content": "MoeGate 告警"},
+            "template": template,
+            "title": {"tag": "plain_text", "content": title},
         },
         "elements": elements,
     }
@@ -248,8 +268,26 @@ def collect_runtime_snapshot() -> Dict[str, Any]:
     return snapshot
 
 
-def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
-    """发送 webhook 告警"""
+def send_alert_message(
+    event_type: str,
+    payload: Dict[str, Any],
+    *,
+    title: str = "MoeGate 告警",
+    template: str = "red",
+    fields: Optional[Sequence[Dict[str, str]]] = None,
+    include_snapshot: bool = True,
+) -> bool:
+    """通用告警发送。
+
+    Args:
+        event_type: 事件类型，非飞书 webhook 会原样带在 JSON 里。
+        payload: 告警上下文（container_id / message / level 等）。
+        title: 飞书卡片标题。
+        template: 飞书卡片主题色（red / orange / blue …）。
+        fields: 额外字段 `[{"label": "分数", "value": 3}]`，飞书卡片按短字段渲染。
+        include_snapshot: 是否附带 CPU/内存/Docker 运行时快照。
+            业务告警（如取证命中）不需要，关掉可避免一次多余的 Docker 查询。
+    """
     if not config.ALERT_WEBHOOK_URL:
         return False
 
@@ -259,12 +297,22 @@ def send_webhook_alert(event_type: str, payload: Dict[str, Any]) -> bool:
 
     payload = dict(payload or {})
     # 自动附加运行时快照（若调用方已提供则不覆盖）
-    if "snapshot" not in payload:
+    if include_snapshot and "snapshot" not in payload:
         payload["snapshot"] = collect_runtime_snapshot()
 
     # 飞书机器人 webhook 适配
     if _is_feishu_bot_webhook(url):
-        body = {"msg_type": "interactive", "card": _build_feishu_card(event_type, payload)}
+        body = {
+            "msg_type": "interactive",
+            "card": _build_feishu_card(
+                event_type,
+                payload,
+                title=title,
+                template=template,
+                extra_fields=fields,
+                include_snapshot=include_snapshot,
+            ),
+        }
     else:
         body = {
             "event_type": event_type,

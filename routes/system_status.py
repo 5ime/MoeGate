@@ -9,7 +9,7 @@ from flask import Blueprint
 from config import config
 from core.responses import error, success
 from middleware import rate_limit, require_api_key
-from utils.alerts import collect_runtime_snapshot, send_webhook_alert
+from utils.alerts import collect_runtime_snapshot, send_alert_message
 
 bp = Blueprint("system_status", __name__, url_prefix="/api/v1")
 logger = logging.getLogger(__name__)
@@ -87,7 +87,7 @@ def get_status():
 def trigger_test_alert():
     """手动触发一次告警（用于验证飞书/通用 webhook 配置）。"""
     try:
-        ok = send_webhook_alert(
+        ok = send_alert_message(
             "manual_test",
             {
                 "message": "这是一条手动测试告警",
