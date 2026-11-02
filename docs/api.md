@@ -68,6 +68,8 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 | `DELETE` | `/api/v1/containers/<id>` | 删除容器（异步，**HTTP 202**） |
 | `GET` | `/api/v1/containers/<id>/destroy-status` | 删除任务状态 |
 | `POST` | `/api/v1/containers/<id>/renew` | 续期 |
+| `GET` | `/api/v1/containers/<id>/logs` | 容器日志快照（stdout + stderr），见下方 [容器日志](#容器日志) |
+| `GET` | `/api/v1/containers/<id>/logs/stream` | 容器日志 SSE 流式跟随（先补历史再持续推送） |
 
 ### 统一入口
 
@@ -95,6 +97,60 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 
 **删除任务状态**：`destroy-status` 返回 `status`（`pending` / `running` / `success` / `failed` / `not_found`）及时间戳字段。
 
+### 容器日志
+
+`GET /api/v1/containers/<id>/logs` 读取**受管容器**的 stdout + stderr：
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `tail` | `200` | 从末尾取多少行，上限 `5000` |
+| `timestamps` | `false` | 是否保留 docker 时间戳前缀 |
+| `since` | 空 | 只返回该 Unix 秒级时间戳之后的日志 |
+
+```bash
+curl -s -H "X-API-Key: <key>" \
+  "http://localhost:8080/api/v1/containers/<container_uuid>/logs?tail=500&timestamps=true"
+```
+
+响应：`lines`（已按行拆分）、`line_count`、`truncated`、`container_name` 等。
+
+#### 流式跟随（SSE）
+
+`GET /api/v1/containers/<id>/logs/stream` 以 SSE（`text/event-stream`）返回：先推送 `tail` 行历史，再持续推送新增日志，直到超时或客户端断开。
+
+| 参数 | 默认 | 说明 |
+|------|------|------|
+| `tail` | `100` | 先补多少行历史，上限 `5000` |
+| `timestamps` | `false` | 是否保留 docker 时间戳前缀 |
+| `max_seconds` | `300` | 最长跟随秒数，上限 `3600` |
+| `max_lines` | `5000` | 本次连接最多推送行数，上限 `20000` |
+
+```bash
+curl -N -H "X-API-Key: <key>" \
+  "http://localhost:8080/api/v1/containers/<container_uuid>/logs/stream?tail=200&max_seconds=600"
+```
+
+事件类型（与其它 SSE 接口一致，由 `core/sse_helpers.py` 统一产出）：
+
+| 事件 | 说明 |
+|------|------|
+| `log` | 一行日志，`data` 为该行文本 |
+| `error` | 出错，`data` 为 `{"msg": ..., "code": ...}`；发完后服务端关闭连接 |
+| `result` | 不会出现在本接口（仅创建/构建类 SSE 的收尾结果） |
+
+服务端到达 `max_seconds` / `max_lines` 时直接关闭流，不发终止事件；前端据此认为"本次跟随正常结束"，可再次连接继续跟随。`max_seconds` 由服务端本地计时强制生效——即使容器长时间没有新日志（Docker 在无新数据时不会主动检查 `until`）也会按时关闭，不会永久占用连接。超长行按 `SSE_MAX_LOG_LINE_LENGTH`（默认 2000 字符）截断并追加 `... [truncated]`。
+
+前端实现见 `frontend/src/composables/useContainerLogs.js`：`fetch` + `response.body.getReader()` 逐块解析 `event:` / `data:`，退出时 `AbortController.abort()` 断开。
+
+#### 共同约束
+
+- 只服务带 `moegate.managed=true` 标签的容器，其它容器一律按不存在处理（404）
+- 非 TTY 容器的 docker 日志是带 8 字节帧头的多路复用流，接口已解帧，不会返回二进制噪声；`tail` 按字节偏移定位可能落在帧中间，已做帧头校验与前向重新同步，不会吞掉行首字符
+- 快照单次返回上限 512KB，超出保留**尾部**并置 `truncated: true`（调小 `tail` 或到宿主机看完整日志）
+- 多容器项目里每个 service 都是独立容器，对各自容器 ID 调用即可
+- 流式接口内部按 5 秒为窗口滚动续拉：快照与 follow 都用内部时间戳去重，传 `since` 不会把历史重放一遍；窗口以当前时间为基准，空闲容器也不会空转或漏读
+- 日志读取（`/logs`、`/logs/stream`）属于证据访问，会写入 `moegate.audit` 审计日志（含来源 IP、request_id、路径）
+
 ### 流量取证
 
 需 `ENABLE_TRAFFIC_CAPTURE=true`，详见 [traffic-capture.md](traffic-capture.md)。
@@ -103,13 +159,17 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| `GET` | `/api/v1/containers/<id>/traffic` | 取证状态（`policy` / `requested` / `running`）+ pcap 文件列表 |
+| `GET` | `/api/v1/containers/<id>/traffic` | 取证状态（`policy` / `requested` / `running` / `stopped` / `target_exists`）+ pcap 文件列表 |
 | `GET` | `/api/v1/containers/<id>/traffic/summary` | pcap 摘要，支持 `?max_packets=50000&max_http=200` |
 | `GET` | `/api/v1/containers/<id>/traffic/<filename>` | 下载单个 pcap（`application/vnd.tcpdump.pcap`） |
 | `POST` | `/api/v1/containers/<id>/traffic/start` | 手动开启（可强制覆盖 `traffic_capture=false`，仅本次 sidecar 有效） |
-| `POST` | `/api/v1/containers/<id>/traffic/stop` | 停止抓包，已落盘文件保留 |
+| `POST` | `/api/v1/containers/<id>/traffic/stop` | 停止抓包（写入持久停止状态，reconcile 不会自动重启），已落盘文件保留 |
 
-`summary` 的 `signals` 字段给出可复核的事实统计（工具型 UA、请求量、节奏、峰值）：`automation_user_agents`、`automation_clients`、`min_median_request_interval_ms`、`peak_requests_per_minute`。
+`summary` 的 `signals` 字段给出可复核的事实统计（工具型 UA、请求量、节奏、峰值）：`automation_user_agents`、`automation_clients`、`min_median_request_interval_ms`、`peak_requests_per_minute`。`summary["files"]` 列出参与聚合的 pcap；存在无法解析的文件时 `message` 会给出说明，而不是笼统的 `ok`。
+
+容器销毁后 `captures.json` 仍保留「容器 ID/名称 → capture_key」映射：`traffic` 状态、`summary` 与 pcap 下载在靶机被自动销毁后依然可用（直到 `TRAFFIC_CAPTURE_RETENTION_HOURS` 到期清理）。此时 `target_exists` 为 `false`，`running` 为 `false`。
+
+`traffic` 与 `traffic/<filename>` 属于证据导出，GET 请求也会写入 `moegate.audit` 审计日志。
 
 ## 镜像
 
@@ -233,22 +293,27 @@ Cookie 模式下，变更类请求（POST/PUT/PATCH/DELETE）还须携带 `X-CSR
 | `memory_limit` / `mem_limit` | string | 也可在顶层传入（与 `resource_limits` 等效） |
 | `cpu_limit` | float | 也可在顶层传入 |
 | `cpu_shares` | int | 也可在顶层传入 |
+| `traffic_capture` | bool | 该靶机是否开启流量取证（共享 netns 的 tcpdump sidecar）；不传走 `TRAFFIC_CAPTURE_DEFAULT`，`true` 而平台未开 `ENABLE_TRAFFIC_CAPTURE` 时直接 400。多 service Compose 下对**每个 service** 各起一个 sidecar。详见 [traffic-capture.md](traffic-capture.md) |
 
 **端口映射规则：**
 
 - `port_mappings` 与 `min_port` / `max_port` **只能二选一**
 - **多 service Compose** 项目会忽略 API 传入的 `port_mappings`，各 service 端口由 compose 文件中的 `ports` 定义并由 MoeGate 自动分配
 
-`env` 注入规则：
+`env` 注入规则（详见 [compose.md](compose.md#三种-flag-模式)）：
 
-- **镜像 / Dockerfile / 单 service Compose**：完整透传，例如 `{"FLAG": "flag{...}"}` 一定进入容器
-- **多 service Compose**：仅注入各 service 实际引用的 `${VAR}`；未赋值的 `FLAG` 引用会各自生成独立值（API 传入的共享 `FLAG` 会被忽略）
+- **模式 1 — 镜像 / Dockerfile / 单 service Compose**：完整透传，例如 `{"FLAG": "flag{...}"}` 一定进入容器
+- **模式 2 — 多 service 各自独立 flag**：用自定义槽位 `{"DEDECMS_FLAG": "f1", "XINHU_FLAG": "f2"}`，
+  各 service 只拿到自己引用的那个变量，不跨服务泄漏
+- **模式 3 — 多 service 共用一个 flag（默认）**：`{"FLAG": "flag{...}"}` 注入**所有** service，
+  无需 compose 逐个声明 `${FLAG}`；未下发时引用 `${FLAG}` 的 service 各自生成随机值，
+  响应 `data` 的 `compose_warnings` 会给出提示
 
-Compose 里 `${VAR}` 占位符会被解析。详见 [compose.md](compose.md)。
+Compose 里 `${VAR}` 占位符会被解析。
 
-Compose 变量替换机制详见 [compose.md](compose.md)。
-
-**创建响应**：Compose 项目在 `COMPOSE_UNSUPPORTED=warn` 且 YAML 含不支持字段时，响应 `data` 可能包含 `compose_warnings` 字符串数组。多 service 项目成功时 `data` 为容器信息数组；单容器/单 service 时为对象。
+**创建响应**：Compose 项目成功时，响应 `data` 可能包含 `compose_warnings` 字符串数组：
+YAML 含永久不支持字段时给出策略提示（`COMPOSE_UNSUPPORTED=warn`），多容器项目未下发 `FLAG` 时给出 flag 提示。
+多 service 项目成功时 `data` 为容器信息数组；单容器/单 service 时为对象。
 
 ## 示例
 
@@ -270,6 +335,15 @@ curl -s -X POST http://localhost:8080/api/v1/containers \
 curl -s -X POST http://localhost:8080/api/v1/containers \
   -H "X-API-Key: <key>" -H "Content-Type: application/json" \
   -d '{"image": "nginx:latest", "max_time": 3600}'
+
+# 创建并开启流量取证（多容器项目会对每个 service 各起一个 sidecar）
+curl -s -X POST http://localhost:8080/api/v1/containers \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"path": "/var/containers/ssrf/docker", "max_time": 3600, "env": {"FLAG": "flag{xxx}"}, "traffic_capture": true}'
+
+# 查看取证状态与 pcap 列表
+curl -s -H "X-API-Key: <key>" \
+  http://localhost:8080/api/v1/containers/<container_uuid>/traffic
 
 # 拉取镜像
 curl -s -X POST http://localhost:8080/api/v1/images/pull \

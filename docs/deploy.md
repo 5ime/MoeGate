@@ -128,6 +128,8 @@ gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:8080 --timeout 120 app:app
 | `TRUST_PROXY_HEADERS` / `TRUSTED_PROXY_IPS` | | 反向代理真实 IP（生产启用前者时后者必填） |
 | `CORS_ALLOWED_ORIGINS` | | 浏览器跨域白名单（逗号分隔） |
 | `RATE_LIMIT_PER_MIN` / `AUTH_FAILURE_LIMIT_PER_MIN` | | IP 限流与认证失败封禁（默认 `60` / `10`） |
+| `TRAFFIC_CAPTURE_QUOTA_MB` | | 单个靶机/service 的 pcap 总量上限（默认 `1024`，`0` 不限制） |
+| `AUDIT_LOG_FILE` | | 审计日志独立落盘（可选）；所在目录必须对容器内 `moegate` 用户可写 |
 
 完整列表与 Session/CSRF/SSE/日志等变量见根目录 `env.example`。
 

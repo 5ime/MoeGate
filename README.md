@@ -8,13 +8,13 @@
 
 ## 特性
 
-**专为 CTF 动态靶场设计** — Compose 模板变量解析、多 service 独立 FLAG 注入，开箱即用。
+**专为 CTF 动态靶场设计** — Compose 模板变量解析，支持单容器单 FLAG、多容器多 FLAG、多容器单 FLAG（默认）三种注入模式，开箱即用。
 
 ### 容器编排
 
 - 多模式创建：Dockerfile 构建 / Docker Compose 编排 / 镜像名称拉取
 - 动态变量注入：支持 Compose 模板变量解析，创建时自动完成参数替换
-- 多 FLAG 支持：多服务环境可独立注入 FLAG，支持自定义变量映射规则
+- 多 FLAG 支持：多容器多 FLAG 按自定义槽位独立注入，多容器单 FLAG 默认共享给所有 service
 - 环境变量继承：支持 API 与 WebUI 动态传参，自动合并至所有服务实例
 - 生命周期管理：自动到期销毁、续期、重启，异步删除
 
@@ -30,7 +30,8 @@
 - SSE 流式日志：构建和拉取镜像过程实时输出
 - 告警 Webhook：支持通用 JSON 与飞书机器人卡片（`POST /api/v1/alerts/test` 手动测试）
 - 受管镜像：自动登记、悬空清理、引用关系约束
-- **流量取证**：每个靶机可附带共享 netns 的 tcpdump sidecar，pcap 落盘 + 摘要 + 自动化信号告警；支持按请求参数 `traffic_capture` 逐台开关，WebUI 内置取证面板（时间线 + pcap 下载）
+- **流量取证**：每个靶机可附带共享 netns 的 tcpdump sidecar，pcap 落盘 + 摘要 + 自动化信号告警；支持按请求参数 `traffic_capture` 逐台开关，WebUI 内置取证面板（时间线 + pcap 下载）。停止抓包持久生效，靶机销毁后留存 pcap 仍可下载/摘要，证据读取写入审计日志
+- **容器日志**：`GET /api/v1/containers/<id>/logs` 读取受管容器的 stdout + stderr（自动解 docker 多路复用帧头，支持 `tail` / `timestamps` / `since`）；`GET /api/v1/containers/<id>/logs/stream` 以 SSE 流式跟随（`max_seconds` 默认 300、`max_lines` 默认 5000，空闲容器也按时结束）。WebUI 容器卡片「日志」按钮查看，面板内可一键「跟随」实时输出
 
 ### 安全与隔离
 
@@ -116,13 +117,16 @@ services:
     command: ["/bin/sh", "-c", "echo '${FLAG}' > /flag && nginx -g 'daemon off;'"]
 ```
 
-- **单 service / 镜像 / Dockerfile**：API 传入的 `env` 完整注入（单 FLAG 应传 `env.FLAG`）
-- **多 service**：仅注入各 service 实际引用的 `${VAR}`，避免跨服务泄漏
-- compose 文件中已写明的变量优先保留
-- 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
-- **多 service 项目里，每个 service 各自生成独立 FLAG**，避免共用同一个 flag；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
+支持三种 FLAG 模式：
 
-自定义变量名同样生效，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 可配合 compose 中的 `${DEDE_FLAG}` 使用。
+- **单容器单 FLAG**：API 传入的 `env` 完整注入（单 FLAG 应传 `env.FLAG`），compose 写不写 `${FLAG}` 都生效
+- **多容器多 FLAG**：各 service 用自定义槽位（如 `${DEDECMS_FLAG}`）引用自己的 flag，按变量名对号入座，不跨服务泄漏
+- **多容器单 FLAG（默认）**：下发的 `FLAG` 注入**所有** service，多容器共用同一个值，适合 SSRF 入口 + 内网 flag 服务这类协同题
+
+被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值；
+需要「多容器各自不同 flag」时，用不同的自定义变量名（`${WEB_FLAG}` / `${DB_FLAG}`）各自下发。
+
+自定义变量名（即独立 FLAG 槽位）同样生效，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 可配合 compose 中的 `${DEDE_FLAG}` 使用。
 
 > **注意**：MoeGate 使用简化 Compose 子集，支持 `image`/`build`/`ports`/`command`/`environment`/`networks`、**bind mount `volumes`**、`privileged`（`COMPOSE_POLICY=ctf` 时）等；**named volume**、`network_mode: host` 等不支持。详见 [docs/compose.md](docs/compose.md)。
 
