@@ -112,6 +112,13 @@ watch(
           </div>
         </SectionCard>
 
+        <div
+          v-if="status?.hint"
+          class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800"
+        >
+          {{ status.hint }}
+        </div>
+
         <SectionCard v-if="captureEnabled" title="pcap 文件" description="按会话轮转命名，容器重启会生成新文件，不覆盖旧证据。">
           <div v-if="loadingStatus" class="py-6 text-center text-xs text-slate-400">加载中...</div>
           <div v-else-if="!hasFiles" class="rounded-lg border border-dashed border-slate-200 bg-slate-50/70 px-3 py-6 text-center text-xs text-slate-500">

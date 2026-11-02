@@ -42,12 +42,19 @@ _HTTP_PREFIXES = (
 )
 
 _AUTOMATION_UA = re.compile(
-    r"(python-requests|python-urllib|curl/|wget/|go-http-client|okhttp|aiohttp|httpx|"
+    r"(python-requests|python-urllib|curl/|\bwget\b|go-http-client|okhttp|aiohttp|httpx|"
     r"axios|node-fetch|undici|headlesschrome|phantomjs|selenium|puppeteer|playwright|"
     r"libwww-perl|masscan|sqlmap|nikto|nuclei|dirsearch|gobuster|ffuf|feroxbuster|"
     r"zgrab|nmap|hydra|wpscan|joomscan|whatweb)",
     re.IGNORECASE,
 )
+
+# IPv6 扩展头（RFC 8200）：不带选项的逐跳/路由/目的选项，以及分片头。
+# 不跳过它们，带扩展头的 IPv6 TCP 会被误判为「非 TCP」而完全不出现在摘要里。
+_IPV6_EXT_OPTIONS = frozenset({0, 43, 60})
+_IPV6_FRAGMENT = 44
+_IPV6_AUTH = 51
+_IPV6_MAX_EXT_HEADERS = 8
 
 
 class PcapFormatError(ValueError):
@@ -116,6 +123,35 @@ def _link_layer(linktype: int, frame: bytes) -> Optional[Tuple[int, int]]:
     return None
 
 
+def _walk_ipv6_extensions(next_header: int, frame: bytes, offset: int):
+    """跳过 IPv6 扩展头，返回 (最终 next_header, L4 偏移)。"""
+    for _ in range(_IPV6_MAX_EXT_HEADERS):
+        if next_header in _IPV6_EXT_OPTIONS:
+            if len(frame) < offset + 2:
+                return None
+            header_len = (frame[offset + 1] + 1) * 8
+            if header_len < 8 or len(frame) < offset + header_len:
+                return None
+            next_header = frame[offset]
+            offset += header_len
+        elif next_header == _IPV6_FRAGMENT:
+            if len(frame) < offset + 8:
+                return None
+            next_header = frame[offset]
+            offset += 8
+        elif next_header == _IPV6_AUTH:
+            if len(frame) < offset + 2:
+                return None
+            header_len = (frame[offset + 1] + 2) * 4
+            if len(frame) < offset + header_len:
+                return None
+            next_header = frame[offset]
+            offset += header_len
+        else:
+            return next_header, offset
+    return None
+
+
 def _ip_layer(ethertype: int, frame: bytes, offset: int) -> Optional[Dict[str, Any]]:
     """解析 IP 头，返回 {proto, src, dst, l4_offset, total_len}。"""
     if ethertype == _ETH_IPV4:
@@ -139,15 +175,19 @@ def _ip_layer(ethertype: int, frame: bytes, offset: int) -> Optional[Dict[str, A
     if ethertype == _ETH_IPV6:
         if len(frame) < offset + 40:
             return None
-        proto = frame[offset + 6]
+        next_header = frame[offset + 6]
         payload_len = struct.unpack("!H", frame[offset + 4:offset + 6])[0]
         src = _format_ipv6(frame[offset + 8:offset + 24])
         dst = _format_ipv6(frame[offset + 24:offset + 40])
+        walked = _walk_ipv6_extensions(next_header, frame, offset + 40)
+        if walked is None:
+            return None
+        proto, l4_offset = walked
         return {
             "proto": proto,
             "src": src,
             "dst": dst,
-            "l4_offset": offset + 40,
+            "l4_offset": l4_offset,
             "total_len": payload_len + 40,
         }
 
@@ -164,7 +204,7 @@ def _format_ipv6(raw: bytes) -> str:
     return ":".join(f"{part:x}" for part in parts)
 
 
-def _parse_http(payload: bytes) -> Optional[Dict[str, str]]:
+def _parse_http(payload: bytes) -> Optional[Dict[str, Any]]:
     """从 TCP 负载中尽力解析一条 HTTP 请求。"""
     if len(payload) < 16 or not payload.startswith(_HTTP_PREFIXES):
         return None
@@ -175,7 +215,13 @@ def _parse_http(payload: bytes) -> Optional[Dict[str, str]]:
     request_line = lines[0].decode("latin-1", "replace").split(" ")
     if len(request_line) < 2:
         return None
-    result = {"method": request_line[0].upper(), "path": request_line[1][:512], "host": "", "user_agent": ""}
+    result: Dict[str, Any] = {
+        "method": request_line[0].upper(),
+        "path": request_line[1][:512],
+        "host": "",
+        "user_agent": "",
+        "content_length": 0,
+    }
     for line in lines[1:32]:
         text = line.decode("latin-1", "replace")
         if ":" not in text:
@@ -186,7 +232,105 @@ def _parse_http(payload: bytes) -> Optional[Dict[str, str]]:
             result["host"] = value.strip()[:255]
         elif key_lower == "user-agent" and not result["user_agent"]:
             result["user_agent"] = value.strip()[:255]
+        elif key_lower == "content-length" and not result["content_length"]:
+            try:
+                result["content_length"] = max(0, int(value.strip()))
+            except (TypeError, ValueError):
+                result["content_length"] = 0
     return result
+
+
+_REASSEMBLY_MAX_FLOWS = 2048
+_REASSEMBLY_MAX_BUFFER = 32 * 1024
+
+
+def _find_http_start(buf: bytes) -> int:
+    best = -1
+    for prefix in _HTTP_PREFIXES:
+        index = buf.find(prefix)
+        if index >= 0 and (best < 0 or index < best):
+            best = index
+    return best
+
+
+class _HttpAssembler:
+    """按 TCP 流重组 HTTP 请求。
+
+    抓包按报文到达，请求行/请求头可能跨段；只按单包解析会漏掉这类请求。
+    这里维护每个方向的有界缓冲，按序号去重/对齐，凑齐 `\\r\\n\\r\\n` 后再解析，
+    并顺带跳过 Content-Length 声明的主体，避免把 POST body 误当成下一条请求。
+    """
+
+    __slots__ = ("buffer", "expected_seq", "body_remaining")
+
+    def __init__(self):
+        self.buffer = bytearray()
+        self.expected_seq: Optional[int] = None
+        self.body_remaining = 0
+
+    def feed(self, seq: int, payload: bytes, ts: float) -> List[Tuple[Dict[str, Any], float]]:
+        if not payload:
+            return []
+
+        if self.expected_seq is not None:
+            if seq < self.expected_seq:
+                overlap = self.expected_seq - seq
+                if overlap >= len(payload):
+                    return []  # 纯重传
+                payload = payload[overlap:]
+                seq = self.expected_seq
+            elif seq > self.expected_seq:
+                # 中间有丢包/乱序：已缓冲的半条请求不可信，丢弃后重新开始
+                self.buffer.clear()
+                self.body_remaining = 0
+        self.expected_seq = seq + len(payload)
+
+        if self.body_remaining > 0:
+            skip = min(self.body_remaining, len(payload))
+            payload = payload[skip:]
+            self.body_remaining -= skip
+            if not payload:
+                return []
+
+        if not self.buffer and not payload.startswith(_HTTP_PREFIXES):
+            return []
+
+        self.buffer.extend(payload)
+        if len(self.buffer) > _REASSEMBLY_MAX_BUFFER:
+            self.buffer.clear()
+            self.body_remaining = 0
+            return []
+
+        results: List[Tuple[Dict[str, Any], float]] = []
+        while self.buffer:
+            if not bytes(self.buffer).startswith(_HTTP_PREFIXES):
+                index = _find_http_start(bytes(self.buffer))
+                if index < 0:
+                    # 只保留可能是半个方法名的尾部，其余丢弃，避免缓冲被噪声占满
+                    if len(self.buffer) > 8:
+                        del self.buffer[:-8]
+                    break
+                del self.buffer[:index]
+
+            header_end = self.buffer.find(b"\r\n\r\n")
+            if header_end < 0:
+                break
+            head = bytes(self.buffer[:header_end + 4])
+            request = _parse_http(head)
+            del self.buffer[:header_end + 4]
+            if request is None:
+                continue
+            results.append((request, ts))
+
+            content_length = int(request.get("content_length") or 0)
+            if content_length:
+                if len(self.buffer) >= content_length:
+                    del self.buffer[:content_length]
+                else:
+                    self.body_remaining = content_length - len(self.buffer)
+                    self.buffer.clear()
+                    break
+        return results
 
 
 def _peak_per_minute(timestamps: List[float]) -> int:
@@ -242,6 +386,7 @@ def summarize_files(
     flows: Dict[Tuple[str, int, str, int, int], Dict[str, Any]] = {}
     http_requests: List[Dict[str, Any]] = []
     clients: Dict[str, Dict[str, Any]] = {}
+    reassembly: Dict[Tuple[str, int, str, int], _HttpAssembler] = {}
 
     remaining = max_packets
     for path in paths:
@@ -312,33 +457,54 @@ def summarize_files(
                 flow["bytes"] += ip["total_len"]
                 flow["last_seen"] = _iso(ts)
 
-            if ip["proto"] != _PROTO_TCP or payload_offset >= len(frame):
+            if ip["proto"] != _PROTO_TCP:
                 continue
-            request = _parse_http(frame[payload_offset:])
-            if request is None:
+            if data_offset < 20 or payload_offset <= l4_offset:
+                continue
+            stream_key = (ip["src"], sport, ip["dst"], dport)
+            # 同一四元组可能被新连接复用（TIME_WAIT 后 ISN 重新随机）：
+            # 看到 SYN 就丢弃旧的半条请求，避免把新连接的数据当成旧序号重传。
+            if frame[l4_offset + 13] & 0x02:
+                reassembly.pop(stream_key, None)
+                continue
+            if payload_offset >= len(frame):
                 continue
 
-            client = clients.get(ip["src"])
-            if client is None:
-                client = {"ip": ip["src"], "requests": 0, "timestamps": [], "user_agents": set(), "paths": []}
-                clients[ip["src"]] = client
-            client["requests"] += 1
-            client["timestamps"].append(ts)
-            if request["user_agent"]:
-                client["user_agents"].add(request["user_agent"])
-            if len(client["paths"]) < 50:
-                client["paths"].append(request["path"])
+            payload = frame[payload_offset:]
+            assembler = reassembly.get(stream_key)
+            if assembler is None:
+                # 只在首个负载看起来像 HTTP 请求时建流，避免给 TLS/扫描器
+                # 等所有 TCP 流都分配缓冲。
+                if not payload.startswith(_HTTP_PREFIXES):
+                    continue
+                if len(reassembly) >= _REASSEMBLY_MAX_FLOWS:
+                    continue
+                assembler = _HttpAssembler()
+                reassembly[stream_key] = assembler
 
-            if len(http_requests) < max_http:
-                http_requests.append({
-                    "time": _iso(ts),
-                    "client": ip["src"],
-                    "client_port": sport,
-                    "method": request["method"],
-                    "host": request["host"],
-                    "path": request["path"],
-                    "user_agent": request["user_agent"],
-                })
+            seq = struct.unpack("!I", frame[l4_offset + 4:l4_offset + 8])[0]
+            for request, request_ts in assembler.feed(seq, payload, ts):
+                client = clients.get(ip["src"])
+                if client is None:
+                    client = {"ip": ip["src"], "requests": 0, "timestamps": [], "user_agents": set(), "paths": []}
+                    clients[ip["src"]] = client
+                client["requests"] += 1
+                client["timestamps"].append(request_ts)
+                if request["user_agent"]:
+                    client["user_agents"].add(request["user_agent"])
+                if len(client["paths"]) < 50:
+                    client["paths"].append(request["path"])
+
+                if len(http_requests) < max_http:
+                    http_requests.append({
+                        "time": _iso(request_ts),
+                        "client": ip["src"],
+                        "client_port": sport,
+                        "method": request["method"],
+                        "host": request["host"],
+                        "path": request["path"],
+                        "user_agent": request["user_agent"],
+                    })
 
     client_list: List[Dict[str, Any]] = []
     automation_agents: List[str] = []

@@ -30,5 +30,8 @@ services:
 
 volumes:
   moegate-data:
-  # 取证 pcap 共享卷：MoeGate 读、tap sidecar 写
+  # 取证 pcap 共享卷：MoeGate 读、tap sidecar 写。
+  # 必须显式 name，否则 Compose 会生成 `<项目名>_moegate-captures`，
+  # 与 TRAFFIC_CAPTURE_VOLUME=moegate-captures 不是同一个卷，表现为"tap 在录但列表永远为空"。
   moegate-captures:
+    name: moegate-captures

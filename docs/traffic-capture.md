@@ -21,15 +21,19 @@ MoeGate 在靶机启动后追加一个 sidecar 容器：
 ```
 靶机容器 (netns)  ←── network_mode: container:<target_id> ──  取证 sidecar (tcpdump)
                                                                       │
-                                                        写 /capture/traffic-<epoch>.pcapN
+                                              写 /capture/<capture_key>/traffic-<epoch>.pcapN
                                                                       │
                                                Docker 卷 moegate-captures（MoeGate 只读挂载）
 ```
 
+- **每个靶机一个子目录**（`capture_key`：compose 项目为 `<project>__<service>`，单机为容器名）。
+  Docker 卷模式下整卷挂在 `/capture` 上，sidecar 自己 `mkdir -p` 出这个子目录再写；
+  少这一层的话所有靶机的 pcap 会平铺在卷根，既无法归属，读取侧也永远找不到文件。
+
 - **共享网络命名空间**，而不是网桥镜像：不需要宿主机 NET_ADMIN / iptables TEE，只有 docker.sock 权限也能用，且能看到 lo 上的流量。
 - sidecar 只加 `NET_ADMIN` + `NET_RAW`，内存默认 128MB；不写 `moegate.managed=true`，**不占学生容器配额**、不出现在容器列表里。
-- pcap 按会话命名（`traffic-<epoch>.pcap0..N`），容器重启不会覆盖上一轮证据。
-- 按 64MB 轮转、最多保留 8 个文件（约 512MB/靶机），超出后覆盖最旧文件，防止磁盘被打满。
+- pcap 按会话命名（`traffic-<毫秒时间戳>-<随机后缀>.pcapN`），同一秒内 stop/start 或重复点击「开始抓包」不会复用文件名、不会覆盖上一轮证据。
+- 单个 tcpdump 进程按 64MB 轮转、最多保留 8 个文件（约 512MB）；**每次重启/手动开始都会新开一组文件名**，多轮会话会累积到保留期（`TRAFFIC_CAPTURE_RETENTION_HOURS`）为止。请按考试场次预留磁盘，并监控取证目录占用。
 
 ## 部署
 
@@ -51,6 +55,13 @@ TRAFFIC_CAPTURE_DIR=/data/captures
 ```
 
 `docker-compose.yml` 已内置 `moegate-captures` 卷并挂到 `/data/captures`，直接复用即可。
+卷定义带了显式 `name: moegate-captures`，避免 Compose 自动加项目前缀；MoeGate 在启动 sidecar 时
+还会从自身容器的 `Mounts` 里解析实际卷名，二者不一致时以实际挂载为准（并在日志里提示）。
+
+> ⚠️ **卷模式下 MoeGate 必须自己挂载同一个卷。** sidecar 写进卷里，MoeGate 按
+> `TRAFFIC_CAPTURE_DIR` 读；如果 MoeGate 跑在容器外（裸机/Windows），卷在 Docker 的 VM 里，
+> 宿主机根本读不到——表现是"sidecar 在录制，文件列表始终是 0"。启动日志会打印一行
+> `读不到取证根目录` 的警告，取证面板顶部也会直接给出提示。
 
 裸机部署（不走容器）时改用宿主机路径：
 
@@ -87,6 +98,7 @@ curl -s -H "X-API-Key: $KEY" \
 | `TRAFFIC_CAPTURE_MAX_FILES` | `8` | 最多保留文件数 |
 | `TRAFFIC_CAPTURE_FILTER` | 空 | 额外 BPF 表达式，如 `not port 22` |
 | `TRAFFIC_CAPTURE_RETENTION_HOURS` | `168` | pcap 保留时长，`0` 不清理 |
+| `TRAFFIC_CAPTURE_QUOTA_MB` | `1024` | 每个靶机/service 的 pcap 总量上限，超出后删最旧文件；`0` 不限制。正在录制的靶机会跳过配额清理 |
 | `TRAFFIC_CAPTURE_MEMORY_LIMIT` | `128m` | sidecar 内存上限 |
 ## 按参数控制是否抓包
 
@@ -96,7 +108,7 @@ curl -s -H "X-API-Key: $KEY" \
 |------|------|----------|----------|
 | 平台级 | `ENABLE_TRAFFIC_CAPTURE` | 整个实例 | 是否具备取证能力 |
 | 容器级 | 创建参数 `traffic_capture` | 单台靶机（写入标签 `moegate.traffic_capture=on/off`） | 只录考试场次 |
-| 运行时 | `POST .../traffic/start` `/stop` | 当前 sidecar 生命周期 | 临时补录 / 立即停录 |
+| 运行时 | `POST .../traffic/start` `/stop` | 停止状态持久生效；手动 start 清除停止标记 | 临时补录 / 立即停录 |
 
 默认姿态：**能力可开、默认不录、按场次显式开**。
 
@@ -124,6 +136,8 @@ curl -s -X POST http://localhost:8080/api/v1/containers \
 
 - 标签落在**靶机**上而非 sidecar 上，所以靶机重启、MoeGate 重启、`reconcile_taps()` 补齐时都以标签为准，不会被"补抓"逻辑偷偷打开。
 - Docker 标签创建后不可变，因此 `POST .../traffic/start` 的强制开启只在**本次 sidecar 生命周期**内有效；靶机重启后回到创建参数决定的策略。需要持久开启请在创建时就传 `traffic_capture: true`。
+- `POST .../traffic/stop` 的停止状态会写入 `captures.json`，`reconcile_taps()` 不会在下一轮把 sidecar 建回来（避免"管理员已停录、平台却又偷偷录"）；再次 `POST .../traffic/start` 会清除该标记。
+- 靶机销毁后，pcap 与「容器 → 取证目录」的映射仍保留：`/traffic`、`/traffic/summary` 和下载接口继续可用，直到保留期清理。
 - 关闭抓包的靶机在创建响应里是 `"traffic_capture": {"enabled": false}`，WebUI 与 API 都不会把"没录"说成"已录"。
 
 ## Docker Compose 项目怎么录
@@ -196,8 +210,19 @@ networks:
 | `GET` | `/api/v1/containers/<id>/traffic` | 取证状态 + 文件列表 + 总大小 |
 | `GET` | `/api/v1/containers/<id>/traffic/summary` | 解析 pcap 生成摘要（可加 `?max_packets=50000&max_http=200`） |
 | `GET` | `/api/v1/containers/<id>/traffic/<filename>` | 下载单个 pcap |
-| `POST` | `/api/v1/containers/<id>/traffic/start` | 手动开启（可覆盖 `traffic_capture=false`，仅本次运行有效） |
-| `POST` | `/api/v1/containers/<id>/traffic/stop` | 停止抓包，**已落盘文件保留** |
+| `POST` | `/api/v1/containers/<id>/traffic/start` | 手动开启（可覆盖 `traffic_capture=false`，仅本次运行有效；同时清除停止标记） |
+| `POST` | `/api/v1/containers/<id>/traffic/stop` | 停止抓包并持久化停止状态，**已落盘文件保留** |
+
+状态里的排障字段：`storage_mode`（`volume` / `host`）、`capture_root`、`readable`（MoeGate 能否读到根目录）、
+`target_exists`（靶机容器是否还在）、`stopped`（是否被管理员显式停止）、`hint`（一句可执行的排查结论，
+正常落盘或已有留存文件时为空字符串）。
+`hint` 优先描述实际状态：sidecar 正在录时不会因为创建参数为 `off` 而误报"不会抓包"。
+
+容器销毁后，状态与下载仍按持久化映射工作（`target_exists=false`）；`summary` 在部分文件损坏时会返回
+`message` 说明，而不是 `ok`。
+
+> 取证数据的读取会被审计：`/traffic`、`/traffic/summary`、`/traffic/<filename>` 以及 `/logs`、`/logs/stream`
+> 都会写入 `moegate.audit`（含来源 IP、request_id、路径），便于回答"谁在什么时候导出了证据"。
 
 `summary` 返回结构（节选）：
 
@@ -263,17 +288,27 @@ networks:
 - **端口映射会把源 IP NAT 成网桥网关**。因此身份归属要靠"容器 ↔ 学生"的绑定关系，不能靠 pcap 里的 IP。
   需要真实源 IP 时，在宿主机对 `docker0` 做 iptables TEE 镜像到独立网卡，再让 sidecar 抓该网卡（改动更大，按需启用）。
 - **HTTPS 抓不到正文**。CTF 靶机以 HTTP 为主，若题目走 HTTPS，摘要里的路径会是空的，只剩连接元信息。
-- **pcap 是敏感数据**，包含学生全部请求内容。建议 `TRAFFIC_CAPTURE_RETENTION_HOURS` 设成考试周期 + 申诉窗口，
-  导出接口只对管理员开放，并保留访问审计。
-- 单个靶机默认最多占 512MB 磁盘，`MAX_CONTAINERS=30` 时峰值约 15GB，请预留空间。
-- 关闭开关后不会再启动新 tap，但已有 tap 需 `POST .../traffic/stop` 或销毁容器才会退出。
+- **pcap 是敏感数据**，包含学生全部请求内容。建议 `TRAFFIC_CAPTURE_RETENTION_HOURS` 设成考试周期 + 申诉窗口；
+  导出接口只对管理员开放，`moegate.audit` 会记录 pcap 与日志的读取。
+- 单个 tcpdump 进程默认最多占 512MB 磁盘；`TRAFFIC_CAPTURE_QUOTA_MB`（默认 1024）会按靶机/service
+  限制多轮会话的 pcap 总量，超出后 reconcile 删最旧文件；正在录制的靶机会跳过，避免删掉 tcpdump 打开的 inode。
+- 关闭开关后不会再启动新 tap，但已有 tap 需 `POST .../traffic/stop` 或销毁容器才会退出；保留期清理与配额清理会继续执行。
+- 摘要按 **TCP 流重组**尽力解析 HTTP：请求行/请求头跨段、pipelined 请求、Content-Length 主体已处理；
+  HTTPS 正文、抓包截断导致首段丢失等情况仍可能漏计，关键争议请下载 pcap 用 Wireshark 复核。
+  IPv6 逐跳/路由/目的选项/分片扩展头已支持跳过，UA 识别包含 busybox `Wget`。
+- 摘要中的时间使用 MoeGate 进程本地时区（无偏移量），跨时区比对请统一到 UTC 或同时参考 pcap 内的时间戳。
 
 ## 故障排查
 
 | 现象 | 排查 |
 |------|------|
 | 创建容器后没有 tap | 看日志是否有"启动流量取证失败"；确认 `ENABLE_TRAFFIC_CAPTURE=true` |
+| tap 在跑但文件列表始终为 0 | 看状态里的 `hint`：多数是 MoeGate 与 sidecar 没共享存储（卷模式要求 MoeGate 也挂该卷，裸机请设 `TRAFFIC_CAPTURE_HOST_DIR`） |
 | 有 tap 但目录为空 | 容器没有流量，或 BPF 过滤表达式写错 |
+| tap 容器 Exited / 状态显示未运行 | 看 sidecar 日志（`docker logs moegate-tap-<id>`）；BPF 写错、镜像缺 tcpdump 都会导致秒退。reconcile 会移除失效 tap 并按策略重建 |
+| 容器销毁后下载 404 | 升级到含 `captures.json` 的版本；确认使用创建时返回的容器 UUID/名称，且文件未被保留期清理 |
+| compose 部署下文件列表一直为空 | 确认 MoeGate 与 sidecar 挂的是同一个卷；新版本会显式 `name: moegate-captures` 并从自身 Mounts 解析实际卷名 |
+| pcap 平铺在卷根、没有子目录 | 旧版本遗留：sidecar 未写进 `<capture_key>/`，升级后重启靶机即可，旧文件无法归属靶机 |
 | 下载 404 | 确认 `TRAFFIC_CAPTURE_DIR` 与卷挂载点一致（容器外路径 vs 容器内路径） |
 | `summary` 报 pcap 解析失败 | 文件正在写入被截断，稍后重试；或 `SNAPLEN` 过小导致头部缺失 |
 | 镜像构建失败 | 离线环境手动 `docker build -t moegate-tap:latest deploy/tap` |

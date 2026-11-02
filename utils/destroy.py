@@ -314,13 +314,14 @@ def destroy_container(container_id: str) -> bool:
     log_func = logger.debug
     log_func("正在销毁容器 %s...", container_id)
 
-    # 先摘掉共享 netns 的取证 sidecar，避免它拖住网络命名空间
-    if getattr(config, "ENABLE_TRAFFIC_CAPTURE", False):
-        try:
-            from services.container.tap import stop_tap
-            stop_tap(container_id)
-        except Exception as tap_err:
-            logger.debug("停止容器流量取证失败: %s, err=%s", container_id, tap_err)
+    # 先摘掉共享 netns 的取证 sidecar，避免它拖住网络命名空间。
+    # 不能只在 ENABLE_TRAFFIC_CAPTURE=true 时执行：能力关闭后已有 tap 仍需清理，
+    # 否则会留下永远占着 netns 的孤儿容器（prune 也依赖这个入口）。
+    try:
+        from services.container.tap import stop_tap
+        stop_tap(container_id)
+    except Exception as tap_err:
+        logger.debug("停止容器流量取证失败: %s, err=%s", container_id, tap_err)
 
     container_name = None
     compose_project_id = None
