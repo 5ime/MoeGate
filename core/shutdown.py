@@ -66,6 +66,19 @@ def graceful_shutdown():
     except Exception as e:
         logger.error("清理容器时发生错误: %s", e)
 
+    # 模块级线程池与 Docker 客户端如果不显式收尾，进程会卡在
+    # concurrent.futures 的 atexit join 上（尤其还有销毁任务在跑时）。
+    try:
+        from utils.destroy import shutdown_executors
+        from utils.container_manager import shutdown_expiry_executor
+        from infra.docker import reset_client
+
+        shutdown_executors()
+        shutdown_expiry_executor()
+        reset_client()
+    except Exception as e:
+        logger.warning("关闭后台执行池时出现问题: %s", e)
+
     logger.info("关闭完成")
 
 

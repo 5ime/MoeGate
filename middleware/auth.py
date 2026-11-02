@@ -65,6 +65,9 @@ def require_api_key(f):
 
         if not api_key:
             logger.warning("API请求缺少认证信息，来源IP: %s", client_ip)
+            # 缺少凭据同样计入失败：否则不带 Key 的刷接口请求永远触发不了封禁
+            # （路由上的 @rate_limit 在认证之后才执行，管不到这条路径）
+            record_auth_failure(client_ip)
             return error("缺少API认证信息，请在Header中提供X-API-Key或先登录", 401)
 
         if not hmac.compare_digest(api_key, config.API_KEY):

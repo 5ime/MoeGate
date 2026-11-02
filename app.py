@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 import uuid
 from flask import Flask, send_from_directory, g, request
 from flask_cors import CORS
@@ -12,6 +13,9 @@ from routes import api_bp
 from utils.static_assets import verify_static_build_info
 
 logger = logging.getLogger(__name__)
+
+# 客户端可控的 X-Request-Id 只允许这些字符（其余一律丢弃）
+_UNSAFE_REQUEST_ID_CHARS = re.compile(r"[^A-Za-z0-9._-]")
 
 _ALLOWED_STATIC_EXT = frozenset({
     '.html', '.css', '.js', '.map', '.json', '.png', '.jpg', '.jpeg',
@@ -70,11 +74,15 @@ def create_app():
     return app
 
 
+
 def _register_request_id_hook(app):
     @app.before_request
     def assign_request_id():
+        # 请求头完全由客户端控制，且会被写进日志和响应头。
+        # 这里只保留安全字符集，杜绝 CRLF 注入（日志伪造 / 响应头拆分）。
         incoming = request.headers.get("X-Request-Id")
-        g.request_id = (incoming.strip()[:64] if incoming else str(uuid.uuid4())[:8])
+        candidate = _UNSAFE_REQUEST_ID_CHARS.sub("", (incoming or "").strip())[:64]
+        g.request_id = candidate or str(uuid.uuid4())[:8]
 
     @app.after_request
     def attach_request_id(response):

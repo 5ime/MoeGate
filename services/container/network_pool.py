@@ -9,6 +9,7 @@ from docker.types import IPAMConfig, IPAMPool
 
 from config.settings import config as default_config, AppConfig
 from core.exceptions import DockerConnectionError, NetworkProvisionError
+from infra.docker_retry import docker_call
 from utils.docker_image import extract_docker_error_message
 
 logger = logging.getLogger(__name__)
@@ -247,6 +248,24 @@ def prune_unused_managed_networks(client, exclude_names: Optional[List[str]] = N
     return removed_networks
 
 
+def _is_managed_external_network(client, name: str) -> bool:
+    """判断 external 网络确由本平台创建（避免靶机接入任意既有网络）。"""
+    try:
+        matched = client.networks.list(names=[name])
+    except docker.errors.APIError as exc:
+        raise NetworkProvisionError(
+            f"查询 Compose external 网络失败: {extract_docker_error_message(exc)}"
+        ) from exc
+    for network in matched or []:
+        # Docker 的 names 过滤是子串匹配，必须再核对一次名字
+        if str(getattr(network, "name", "") or "") != name:
+            continue
+        labels = ((getattr(network, "attrs", None) or {}).get("Labels") or {})
+        if str(labels.get("moegate.managed") or "").lower() == "true":
+            return True
+    return False
+
+
 def create_compose_network(
     client,
     resolved_name: str,
@@ -276,7 +295,10 @@ def create_compose_network(
 
     if driver.strip().lower() != "bridge":
         try:
-            client.networks.create(resolved_name, **base_create_kwargs)
+            docker_call(
+                lambda: client.networks.create(resolved_name, **base_create_kwargs),
+                label="创建 Compose 网络",
+            )
             return
         except docker.errors.APIError as exc:
             raise NetworkProvisionError(f"创建 Compose 网络失败: {extract_docker_error_message(exc)}")
@@ -297,7 +319,10 @@ def create_compose_network(
         create_kwargs["ipam"] = build_ipam_config(str(subnet), gateway)
 
         try:
-            client.networks.create(resolved_name, **create_kwargs)
+            docker_call(
+                lambda: client.networks.create(resolved_name, **create_kwargs),
+                label="创建 Compose 受管网络",
+            )
             return
         except docker.errors.APIError as exc:
             if is_network_pool_overlap_error(exc):
@@ -358,6 +383,13 @@ def ensure_compose_networks(
                 resolved_name = external_cfg.get("name") or cfg.get("name") or str(network_key)
             else:
                 resolved_name = cfg.get("name") or str(network_key)
+            # external 指向的是宿主机上已存在的网络，等于把靶机接进任意网络。
+            # 必须是本平台建的（带 moegate.managed 标签）才放行。
+            if not _is_managed_external_network(client, str(resolved_name)):
+                raise NetworkProvisionError(
+                    f"Compose 网络 {network_key} 声明为 external，"
+                    f"但 {resolved_name} 不是本平台创建的受管网络"
+                )
             mapping[str(network_key)] = str(resolved_name)
             continue
 

@@ -1,5 +1,6 @@
 """FRP 运行时设置辅助函数。"""
 
+import re
 from typing import Dict, Optional, Tuple
 
 from config import config
@@ -7,6 +8,10 @@ from core.events import get_event_bus
 from services import runtime_store
 from services.frp.event_handler import handle_container_created
 from services.frp.redact import is_password_placeholder, mask_frp_settings_payload
+# FRP 管理地址会带上管理员账号密码去访问，必须是纯主机名/IP，
+# 不接受 URL、路径、端口号或带凭据的写法，避免被改成任意地址后泄露口令。
+_HOST_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+
 FRP_SETTING_FIELD_MAP = {
     "enabled": "ENABLE_FRP",
     "server_addr": "FRP_SERVER_ADDR",
@@ -73,6 +78,12 @@ def parse_frp_settings_update(body: Dict[str, object]) -> Tuple[Optional[str], O
             if not isinstance(updates[field], str):
                 return f"字段 {field} 必须为字符串", None
             updates[field] = updates[field].strip()
+
+    host_fields = ["server_addr", "admin_ip"]
+    for field in host_fields:
+        value = updates.get(field)
+        if value and not _HOST_PATTERN.match(value):
+            return f"字段 {field} 必须是主机名或 IP，不接受 URL / 路径 / 端口", None
 
     return None, updates
 

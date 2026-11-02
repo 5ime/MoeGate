@@ -87,11 +87,16 @@ def submit_destroy_task(container_id: str) -> dict:
                 current["started_at"] = _now_iso()
 
         try:
-            destroy_container(cid)
+            ok = destroy_container(cid)
             with _destroy_task_lock:
                 current = _destroy_task_state.get(cid)
                 if current is not None:
-                    current["status"] = "success"
+                    if ok:
+                        current["status"] = "success"
+                    else:
+                        # 容器没删掉就不能报成功：上层据此判断能否继续清理项目网络
+                        current["status"] = "failed"
+                        current["error"] = "容器停止或删除未完成，请检查 Docker 状态"
                     current["finished_at"] = _now_iso()
         except Exception as exc:  # pragma: no cover - defensive branch
             logger.exception("后台销毁容器失败: %s", cid)
@@ -299,10 +304,24 @@ def _remove_compose_networks(compose_project_id: str, network_names=None):
     return removed_networks
 
 
-def destroy_container(container_id: str):
-    """销毁指定容器并清理相关资源。"""
+def destroy_container(container_id: str) -> bool:
+    """销毁指定容器并清理相关资源。
+
+    Returns:
+        bool: 容器是否确实被停止并删除。返回 False 时调用方不能当作销毁成功，
+              否则会以为容器已消失而继续清理项目网络、释放名额。
+    """
     log_func = logger.debug
     log_func("正在销毁容器 %s...", container_id)
+
+    # 先摘掉共享 netns 的取证 sidecar，避免它拖住网络命名空间
+    if getattr(config, "ENABLE_TRAFFIC_CAPTURE", False):
+        try:
+            from services.container.tap import stop_tap
+            stop_tap(container_id)
+        except Exception as tap_err:
+            logger.debug("停止容器流量取证失败: %s, err=%s", container_id, tap_err)
+
     container_name = None
     compose_project_id = None
     manager = get_container_manager()
@@ -325,6 +344,13 @@ def destroy_container(container_id: str):
                     container = None
 
         if container:
+            # 缓存里的容器对象可能停留在创建时的快照，端口/标签都已过期。
+            # 销毁前刷新一次，确保 FRP 配置与端口回收用的是真实状态。
+            try:
+                container.reload()
+            except Exception as exc:
+                logger.debug("刷新容器 %s 状态失败，改用缓存快照: %s", container_id, exc)
+
             try:
                 container_name = container.name
             except Exception:
@@ -339,19 +365,22 @@ def destroy_container(container_id: str):
             if config.ENABLE_FRP and container_name:
                 try:
                     from services.frp import delete_container_proxy_configs
+
                     ok, msg = delete_container_proxy_configs(container_name)
                     if ok:
                         log_func("已删除容器 %s 的FRP代理配置", container_name)
                     else:
-                        logger.debug("删除容器 %s 的FRP代理配置失败: %s", container_name, msg)
+                        # 代理配置删不掉会一直占着 FRP 远端端口，必须可见
+                        logger.warning("删除容器 %s 的FRP代理配置失败: %s", container_name, msg)
                 except Exception as e:
-                    logger.debug("删除FRP代理配置时发生错误: %s", e)
+                    logger.warning("删除FRP代理配置时发生错误: %s", e)
 
             try:
                 container.stop(timeout=10)
             except NotFound:
                 log_func("容器 %s 已不存在，跳过停止操作", container_id)
             except APIError as e:
+                had_error = True
                 logger.warning("停止容器时发生 API 错误: %s", e)
 
             try:
@@ -363,6 +392,7 @@ def destroy_container(container_id: str):
                 if _is_removal_in_progress_error(e):
                     logger.debug("容器 %s 正在被删除，跳过重复 remove", container_id)
                 else:
+                    had_error = True
                     logger.warning("删除容器时发生 API 错误: %s", e)
 
             try:
@@ -398,8 +428,24 @@ def destroy_container(container_id: str):
             had_error = True
             logger.warning("清理容器资源时发生错误: %s", e)
 
-    if not had_error and not compose_project_id:
-        logger.info("容器 %s 销毁完成", container_id)
-    elif not had_error:
+    # 项目网络无论销毁是否干净都要尝试清理：_remove_compose_networks 会跳过
+    # 仍有容器挂载的网络，本身是幂等的，失败时更不能留下悬空网络。
+    if compose_project_id:
         _remove_compose_networks(compose_project_id)
         logger.info("Compose 容器 %s 销毁完成，已检查项目网络清理", container_id)
+
+    if had_error:
+        logger.warning("容器 %s 销毁未完全成功，请检查 Docker 状态", container_id)
+    elif not compose_project_id:
+        logger.info("容器 %s 销毁完成", container_id)
+
+    return not had_error
+
+
+def shutdown_executors(wait: bool = True) -> None:
+    """关闭销毁/清理线程池（进程退出前调用）。"""
+    for executor in (_destroy_executor, _cleanup_executor):
+        try:
+            executor.shutdown(wait=wait)
+        except Exception as exc:
+            logger.debug("关闭销毁线程池失败: %s", exc)
