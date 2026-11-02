@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
-ARG NODE_IMAGE=node:20-alpine
-ARG PYTHON_IMAGE=python:3.11-slim
+ARG NODE_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/node:22-alpine
+ARG PYTHON_IMAGE=swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/python:3.11-slim
 
 FROM ${NODE_IMAGE} AS frontend
 WORKDIR /build/frontend
@@ -35,7 +35,9 @@ COPY . .
 COPY --from=frontend /build/static ./static
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 
+# Windows 上 core.autocrlf=true 检出会把脚本变成 CRLF，`#!/bin/sh\r` 直接导致容器起不来。
 RUN chmod +x /usr/local/bin/docker-entrypoint.sh \
+    && sed -i 's/\r$//' /usr/local/bin/docker-entrypoint.sh \
     && useradd --create-home --shell /usr/sbin/nologin moegate \
     && mkdir -p /data/containers \
     && chown -R moegate:moegate /app /data/containers
