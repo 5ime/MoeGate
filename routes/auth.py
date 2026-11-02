@@ -12,6 +12,7 @@ from middleware.auth_guard import (
     is_auth_failure_blocked,
     record_auth_failure,
 )
+from middleware.auth import require_api_key
 from middleware.ip import get_client_ip
 from middleware.csrf import (
     apply_csrf_cookie,
@@ -24,6 +25,8 @@ from middleware.csrf import (
 from middleware.session import (
     create_session_token,
     read_session_token_from_request,
+    revoke_all_sessions,
+    revoke_session_token,
     session_cookie_enabled,
     session_cookie_name,
     verify_session_token,
@@ -120,10 +123,44 @@ def login_with_api_key():
 @rate_limit(max_per_min=30)
 def logout_session():
     token = read_session_token_from_request(request)
-    if verify_session_token(token or "") and csrf_enabled():
-        if not validate_csrf_for_session_request(request):
+    # 只清 Cookie 的话，token 本身仍然有效（无状态签名串），
+    # 必须同时在服务端吊销，否则"退出登录"形同虚设。
+    if verify_session_token(token or ""):
+        if csrf_enabled() and not validate_csrf_for_session_request(request):
             return error("CSRF 校验失败", 403)
+        revoke_session_token(token or "")
+        logger.info("会话已吊销并退出登录")
     response = make_response(success({"authenticated": False}, "已退出登录"))
+    _clear_session_cookie(response)
+    clear_csrf_cookie(response)
+    return response
+
+
+@bp.route("/logout-all", methods=["POST"])
+@rate_limit(max_per_min=10)
+@require_api_key
+def logout_all_sessions():
+    """吊销全部已签发会话（轮换 API Key 或发现凭证泄露后使用）。"""
+    if not session_cookie_enabled():
+        return error("当前未启用 Cookie Session 认证", 400)
+    epoch = revoke_all_sessions()
+    logger.warning("已吊销全部会话（epoch=%s），所有客户端需重新登录", epoch)
+    response = make_response(success({"epoch": epoch}, "已吊销全部会话"))
+    _clear_session_cookie(response)
+    clear_csrf_cookie(response)
+    return response
+
+
+@bp.route("/session", methods=["DELETE"])
+@rate_limit(max_per_min=10)
+@require_api_key
+def revoke_current_session():
+    """吊销当前请求使用的会话（等价于带鉴权的 logout）。"""
+    if not session_cookie_enabled():
+        return error("当前未启用 Cookie Session 认证", 400)
+    token = read_session_token_from_request(request)
+    revoked = revoke_session_token(token or "")
+    response = make_response(success({"revoked": revoked}))
     _clear_session_cookie(response)
     clear_csrf_cookie(response)
     return response
