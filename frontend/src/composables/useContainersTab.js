@@ -36,6 +36,7 @@ export function useContainersTab({ containers }) {
 
   const detailModal = ref({ open: false, title: '', data: null, loading: false, mode: '' });
   const forensicsModal = ref({ open: false, container: null });
+  const logsModal = ref({ open: false, container: null });
 
   function openForensics(item) {
     forensicsModal.value = { open: true, container: item || null };
@@ -43,6 +44,14 @@ export function useContainersTab({ containers }) {
 
   function closeForensics() {
     forensicsModal.value = { open: false, container: null };
+  }
+
+  function openLogs(item) {
+    logsModal.value = { open: true, container: item || null };
+  }
+
+  function closeLogs() {
+    logsModal.value = { open: false, container: null };
   }
 
   function getStatusClass(status) {
@@ -332,6 +341,9 @@ export function useContainersTab({ containers }) {
     forensicsModal,
     openForensics,
     closeForensics,
+    logsModal,
+    openLogs,
+    closeLogs,
     getStatusClass,
     visibleContainers,
     hasSearchKeyword,

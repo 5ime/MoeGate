@@ -23,6 +23,11 @@ from services.container.operations import (
     renew_any,
 )
 from services.container.info import list_containers, get_container_info, get_container_detail, get_compose_project_detail
+from services.container.logs import (
+    get_container_logs,
+    iter_container_logs,
+    normalize_max_lines,
+)
 
 __all__ = [
     'start_container',
@@ -42,4 +47,7 @@ __all__ = [
     'get_container_info',
     'get_container_detail',
     'get_compose_project_detail',
+    'get_container_logs',
+    'iter_container_logs',
+    'normalize_max_lines',
 ]

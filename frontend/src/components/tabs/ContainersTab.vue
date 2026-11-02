@@ -4,6 +4,7 @@ import ConfirmModal from '../ConfirmModal.vue';
 import ObjectDetailModal from '../ObjectDetailModal.vue';
 import SearchSelectBar from '../SearchSelectBar.vue';
 import TrafficForensicsModal from '../container/TrafficForensicsModal.vue';
+import ContainerLogsModal from '../container/ContainerLogsModal.vue';
 import StatCard from '../ui/StatCard.vue';
 import { useContainersTab } from '../../composables/useContainersTab';
 
@@ -30,6 +31,9 @@ const {
   forensicsModal,
   openForensics,
   closeForensics,
+  logsModal,
+  openLogs,
+  closeLogs,
   getStatusClass,
   visibleContainers,
   hasSearchKeyword,
@@ -148,6 +152,9 @@ const {
             <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3 text-xs font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="viewContainer(item.id)">
               详情
             </button>
+            <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="openLogs(item)" title="查看容器日志（stdout + stderr）">
+              日志
+            </button>
             <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="openForensics(item)" title="流量取证：pcap 下载与自动化信号">
               取证
             </button>
@@ -205,6 +212,12 @@ const {
       :visible="forensicsModal.open"
       :container="forensicsModal.container"
       @close="closeForensics"
+    />
+
+    <ContainerLogsModal
+      :visible="logsModal.open"
+      :container="logsModal.container"
+      @close="closeLogs"
     />
 
     <ConfirmModal

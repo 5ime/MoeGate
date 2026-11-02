@@ -18,6 +18,9 @@ from services.container import (
     renew_any,
     get_container_detail,
     get_compose_project_detail,
+    get_container_logs,
+    iter_container_logs,
+    normalize_max_lines,
 )
 from middleware import (
     validate_json,
@@ -26,6 +29,7 @@ from middleware import (
     require_api_key,
     get_client_ip,
 )
+from core.exceptions import ValidationError
 from core.route_helpers import handle_service_call
 from core.sse_helpers import iter_sse_events
 from core.responses import error, success
@@ -235,6 +239,73 @@ def renew_container(container_id: str):
     dto = {"container_id": container_id}
     return handle_service_call(renew_task, "容器续期成功", 200, dto, app_config=config)
 
+
+
+@bp.route("/containers/<container_id>/logs", methods=["GET"])
+@require_api_key
+@log_request("获取容器日志")
+@rate_limit(max_per_min=60)
+def get_container_logs_route(container_id: str):
+    """读取容器日志（stdout + stderr）。
+
+    查询参数：`tail`（默认 200，上限 5000）、`since`（Unix 秒级时间戳）、`timestamps`。
+    """
+    return handle_service_call(
+        get_container_logs,
+        "获取容器日志成功",
+        200,
+        container_id,
+        tail=request.args.get("tail"),
+        since=request.args.get("since"),
+        timestamps=request.args.get("timestamps"),
+    )
+
+
+@bp.route("/containers/<container_id>/logs/stream", methods=["GET"])
+@require_api_key
+@log_request("跟随容器日志")
+@rate_limit(max_per_min=20)
+def stream_container_logs(container_id: str):
+    """跟随容器日志（SSE 流式）。
+
+    查询参数：`tail`（先补多少行存量，默认 100）、`timestamps`、
+    `max_seconds`（跟随时长上限，默认 300，上限 3600）、`max_lines`（本次最多推多少行）。
+    """
+    max_line_len = int(getattr(config, "SSE_MAX_LOG_LINE_LENGTH", 2000) or 2000)
+    # 参数必须在请求上下文内取好：生成器是延迟执行的，届时 request 已不可用
+    tail_arg = request.args.get("tail") or 100
+    since_arg = request.args.get("since")
+    timestamps_arg = request.args.get("timestamps")
+    max_seconds_arg = request.args.get("max_seconds")
+    max_lines_arg = request.args.get("max_lines")
+    # 事件上限跟本次请求的 max_lines 对齐：SSE_MAX_LOG_EVENTS 默认 2000，
+    # 若直接沿用会在 max_lines（默认 5000）生效前就触发 429 终止事件
+    try:
+        max_events = normalize_max_lines(max_lines_arg) + 1
+    except ValidationError as exc:
+        return error(exc.message, 400)
+
+    def generate():
+        yield from iter_sse_events(
+            iter_container_logs(
+                container_id,
+                tail=tail_arg,
+                since=since_arg,
+                timestamps=timestamps_arg,
+                max_seconds=max_seconds_arg,
+                max_lines=max_lines_arg,
+            ),
+            max_events=max_events,
+            max_line_len=max_line_len,
+            internal_error_msg=_SSE_INTERNAL_ERROR_MSG,
+            logger=logger,
+        )
+
+    return Response(
+        generate(),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @bp.route("/containers/<container_id>/traffic", methods=["GET"])
