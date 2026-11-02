@@ -19,7 +19,7 @@ const props = defineProps({
     <div class="mt-2">
       <KeyValueLinesEditor
         v-model="props.form.envText"
-        :rows="3"
+        :rows="8"
         placeholder="例如&#10;DEBUG=true&#10;NODE_ENV=production"
         @validate="props.validateEnvFormat"
       >

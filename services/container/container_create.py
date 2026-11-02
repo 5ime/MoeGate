@@ -104,6 +104,7 @@ def build_container_create_kwargs(
     environment: Optional[Dict] = None,
     extra_labels: Optional[Dict[str, str]] = None,
     network: Optional[str] = None,
+    network_aliases: Optional[List[str]] = None,
     network_mode: Optional[str] = "bridge",
     resource_limits: Optional[Dict[str, Any]] = None,
     app_config: AppConfig = None,
@@ -162,6 +163,24 @@ def build_container_create_kwargs(
 
     if network:
         create_kwargs["network"] = network
+        # Compose 项目内按 service 名互访（web -> api）依赖网络别名。
+        # MoeGate 用 SDK 直接建容器，不会像 docker compose 那样自动写 service 别名，
+        # 不补这一步 `http://api:8080` 在靶机内无法解析。
+        aliases = [
+            str(alias).strip()
+            for alias in (network_aliases or [])
+            if str(alias).strip()
+        ]
+        if aliases:
+            try:
+                from docker.constants import DEFAULT_DOCKER_API_VERSION
+                from docker.types import EndpointConfig
+
+                create_kwargs["networking_config"] = {
+                    network: EndpointConfig(DEFAULT_DOCKER_API_VERSION, aliases=aliases)
+                }
+            except Exception as exc:  # pragma: no cover - 老版本 SDK 退回仅容器名解析
+                logger.warning("设置网络别名失败，将只按容器名解析: %s", exc)
     elif network_mode:
         create_kwargs["network_mode"] = network_mode
     

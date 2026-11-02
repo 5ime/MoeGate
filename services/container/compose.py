@@ -10,7 +10,10 @@ from config.settings import AppConfig, config as default_config
 from core.exceptions import DockerConnectionError, ImageBuildError, ValidationError
 from infra.docker import ensure_client
 from infra.docker_retry import docker_call
-from services.container.compose_env import apply_compose_service_env
+from services.container.compose_env import (
+    apply_compose_service_env,
+    collect_service_var_references,
+)
 from services.container.compose_policy import (
     order_compose_services,
     prepare_compose_services_policy,
@@ -92,6 +95,27 @@ def _load_compose_services(compose_path: str) -> Tuple[Dict[str, Any], Dict[str,
     return content, services, compose_warnings, ordered_services
 
 
+def _shared_flag_warning(
+    services: Dict[str, Any],
+    env: Optional[Dict[str, Any]],
+    multi_service: bool,
+) -> Optional[str]:
+    """多容器题目调用方未下发 FLAG 时返回提示文案，供日志与 API 响应复用。
+
+    此时引用 ${FLAG} 的 service 会各自生成随机值，平台侧无法校验，题目必然判错。
+    """
+    if not multi_service:
+        return None
+    if str(dict(env or {}).get("FLAG") or "").strip():
+        return None
+    if not any("FLAG" in collect_service_var_references(service) for service in services.values()):
+        return None
+    return (
+        "多容器项目未下发 FLAG：引用 ${FLAG} 的 service 已各自生成随机 flag，平台无法校验；"
+        "需要每容器独立 flag 时请改用不同的自定义变量名（如 ${WEB_FLAG} / ${DB_FLAG}）各自下发"
+    )
+
+
 def _normalize_cap_list(raw: Any) -> Optional[List[str]]:
     if raw is None:
         return None
@@ -136,6 +160,10 @@ def start_from_compose(
         )
 
         multi_service = len(services) > 1
+        flag_warning = _shared_flag_warning(services, env, multi_service)
+        if flag_warning:
+            logger.warning(flag_warning)
+            compose_warnings.append(flag_warning)
 
         for name, service in ordered_services:
             if multi_service:
@@ -278,6 +306,9 @@ def create_container_from_service(
         environment=service.get("environment"),
         extra_labels=extra_labels,
         network=primary_network,
+        # docker compose 会把 service 名注册成网络别名；MoeGate 用 SDK 直接建容器，
+        # 必须显式补上，否则 compose 里 `web -> api`、`api -> db` 的 service 名解析不到。
+        network_aliases=[str(service.get("_compose_service_name") or "")],
         network_mode=None if primary_network else "bridge",
         resource_limits=resource_limits,
         app_config=app_config,
@@ -299,7 +330,8 @@ def create_container_from_service(
 
         for network_name in service.get("_extra_networks", []):
             try:
-                client.networks.get(network_name).connect(container)
+                aliases = [str(service.get("_compose_service_name") or "")] if service.get("_compose_service_name") else None
+                client.networks.get(network_name).connect(container, aliases=aliases)
             except Exception as network_err:
                 logger.warning("连接额外网络失败: %s, err=%s", network_name, network_err)
 
@@ -367,6 +399,10 @@ def _start_from_compose_streaming(
         )
 
         multi_service = len(services) > 1
+        flag_warning = _shared_flag_warning(services, env, multi_service)
+        if flag_warning:
+            logger.warning(flag_warning)
+            compose_warnings.append(flag_warning)
 
         for name, service in ordered_services:
             if multi_service:

@@ -11,17 +11,28 @@ services:
     command: ["/bin/sh", "-c", "echo '${FLAG}' > /flag && docker-entrypoint.sh redis-server"]
 ```
 
+## 三种 FLAG 模式
+
+| 模式 | 场景 | 上游传参 | 行为 |
+|------|------|----------|------|
+| 1. 单容器单 FLAG | 单 service / 镜像 / Dockerfile | `env: {"FLAG": "flag{xxx}"}` | `env` **完整注入**容器，compose 里写不写 `${FLAG}` 都生效 |
+| 2. 多容器多 FLAG | 多 service，各容器一道独立题 | `env: {"DEDECMS_FLAG": "f1", "XINHU_FLAG": "f2"}` | 按变量名对号入座，各 service 只拿到自己引用的那个槽位 |
+| 3. 多容器单 FLAG（默认） | 多 service 协同出题，如 SSRF 入口 + 内网 flag 服务 | `env: {"FLAG": "flag{xxx}"}` | 下发的 `FLAG` 注入**所有** service，多容器共用同一个值 |
+
+模式 2 与模式 3 可以共存：自定义槽位（`${DEDECMS_FLAG}` 等）始终按名字透传，只有名为 `FLAG` 的变量被当作共享槽位。
+
 ## 规则说明
 
-- **单 service / 镜像 / Dockerfile**：API 传入的 `env` **完整注入**容器（即使 compose 未写 `${FLAG}`）。上游单 FLAG 场景应传 `env.FLAG`，MoeGate 原样写入。
-- **多 service**：`env` 仅注入各 service 在 `environment` / `command` 中实际引用的 `${VAR}`，避免其它服务的变量泄漏
-- compose 文件中已写明的变量优先保留
-- 被引用但未赋值的变量（常见如 `FLAG`）会自动生成 `flag{uuid}` 格式的唯一值
-- **多 service 项目里，每个 service 各自生成独立 FLAG**（即便 API 传了共享 `FLAG` 也会丢弃后各自生成）；自定义名（如 `DEDECMS_FLAG`）也只会出现在引用它的那个 service 中
+- **模式 1**：API 传入的 `env` **完整注入**容器（即使 compose 未写 `${FLAG}`）。上游单 FLAG 场景应传 `env.FLAG`，MoeGate 原样写入。
+- **模式 2**：`env` 仅注入各 service 在 `environment` / `command` 中实际引用的 `${VAR}`，避免其它服务的变量泄漏
+- **模式 3**：下发的 `FLAG` 注入所有 service，且**优先于 compose 中写死的同名值**；未下发（含空值）时引用 `${FLAG}` 的 service 各自生成 `flag{uuid}`，并记录 warning、同时出现在 API 响应 `data[].compose_warnings` 中提示平台无法校验
+- 被引用但未赋值的变量会自动生成 `flag{uuid}` 格式的唯一值
+- 需要「多容器、每容器各自不同 flag」时，用不同的自定义变量名（`${WEB_FLAG}` / `${DB_FLAG}`）各自下发，
+  即模式 2；MoeGate 不会凭空生成平台无法校验的 flag
 
-## 自定义变量名
+## 自定义变量名（模式 2）
 
-自定义变量名同样生效，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 可配合 compose 中的 `${DEDE_FLAG}` 使用：
+自定义变量名即独立的 FLAG 槽位，例如 `env: {"DEDE_FLAG": "flag{xxx}"}` 配合 compose 中的 `${DEDE_FLAG}` 使用：
 
 ```bash
 curl -s -X POST http://localhost:8080/api/v1/containers \
@@ -29,27 +40,39 @@ curl -s -X POST http://localhost:8080/api/v1/containers \
   -d '{"path": "/var/containers/ctf-lab", "max_time": 3600, "env": {"DEDE_FLAG": "flag{custom}"}}'
 ```
 
-## 多 service 场景
+## 多容器单 FLAG（模式 3，默认）
+
+多容器协同题目最常见的形态：平台只下发一个 flag，入口容器与内网服务必须拿到**同一个**值，
+否则平台校验必然失败。
 
 ```yaml
 services:
-  web:
-    image: nginx:latest
+  healthscan:
+    build: ../
     environment:
-      - FLAG=${FLAG}
-  db:
-    image: mysql:8
+      - FLAG=${FLAG}      # 写了会被替换成下发值
+  opsagent:
+    build: ../opsagent
     environment:
       - FLAG=${FLAG}
 ```
 
-上述 compose 启动后，`web` 与 `db` 各自获得不同的 `FLAG` 值，适合 CTF 中需要 per-service 独立 flag 的题型。
+调用：
+
+```bash
+curl -s -X POST http://localhost:8080/api/v1/containers \
+  -H "X-API-Key: <key>" -H "Content-Type: application/json" \
+  -d '{"path": "/var/containers/ssrf/docker", "max_time": 3600, "env": {"FLAG": "flag{xxx}"}}'
+```
+
+两个 service 都会拿到 `flag{xxx}`。即使某个 service 没写 `${FLAG}`，下发值同样会注入，
+无需在 compose 中逐个声明；compose 里写死的占位 flag（如 `FLAG: "flag{test}"`）会被下发值覆盖。
 
 ## MoeGate Compose SDK 子集
 
 MoeGate 通过 **Docker SDK 直接创建容器**（非 `docker compose` CLI），在保留受控网络、随机端口池、FRP 注册与 TTL 的前提下，支持以下字段。
 
-**路径解析**：`path` 目录内按 `docker-compose.yaml` → `docker-compose.yml` → `Dockerfile` 顺序选择配置文件。
+**路径解析**：`path` 目录内按 `docker-compose.yaml` → `docker-compose.yml` → `Dockerfile` 顺序选择配置文件（不递归子目录）。
 
 | 字段 | 说明 |
 |------|------|
@@ -63,6 +86,10 @@ MoeGate 通过 **Docker SDK 直接创建容器**（非 `docker compose` CLI）�
 | `cap_add` / `cap_drop` | Linux capabilities（strict 模式拒绝高危 cap；ctf 模式对高危 cap 给出提示） |
 | `depends_on` | 仅决定**启动顺序**，不等待 healthcheck |
 | API `resource_limits` | 内存/CPU 限制（映射到容器创建参数）；单容器上限 64G / 64 核 |
+
+> **服务名互访**：MoeGate 会把每个 service 名注册为所在网络的别名（含 `networks` 中声明的额外网络），
+> 因此 `web` 内可以直接 `curl http://api:8080`、`api` 内可以访问 `http://db:3306`，与 `docker compose` 行为一致。
+> 仍建议 compose 显式声明 `networks:`，否则容器落在默认 bridge 上，服务名解析与内部流量取证都不可靠。
 
 ### 永久不支持的字段
 

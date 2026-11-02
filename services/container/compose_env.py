@@ -80,10 +80,12 @@ def resolve_compose_service_env(
 ) -> Dict[str, str]:
     """合并 compose / 全局环境变量，并解析 ${VAR}。
 
-    - 单 service：API 传入的全局 env 完整注入（与镜像/Dockerfile 单容器一致），
+    - 单 service（模式 1）：API 传入的全局 env 完整注入（与镜像/Dockerfile 单容器一致），
       确保调用方传入的 FLAG 等变量一定进入容器。
-    - 多 service：仅注入本 service 在 environment / command 中引用的变量，
-      避免其它服务的 FLAG 泄漏；共享 FLAG 会被丢弃并由各 service 各自生成。
+    - 多 service：仅注入本 service 在 environment / command 中引用的变量，避免跨服务泄漏。
+      - 自定义槽位（模式 2，如 ${DEDECMS_FLAG}）：按变量名对号入座，原样透传
+      - 名为 FLAG 的下发值（模式 3）：视为共享槽位，注入**所有** service，
+        不要求 compose 中逐个声明 ${FLAG}，且优先于 compose 里写死的同名值
     """
     merged_env = parse_service_environment(service.get("environment"))
     referenced_vars = collect_service_var_references(service)
@@ -96,8 +98,12 @@ def resolve_compose_service_env(
         filtered_global = {
             key: value for key, value in raw_global.items() if key in referenced_vars
         }
-        # 多 service 时丢弃共享 FLAG，让各 service 各自生成独立值
-        if "FLAG" in filtered_global and "FLAG" in referenced_vars:
+        # 模式 3：FLAG 是共享槽位，所有容器共用同一个值（即使该 service 没写 ${FLAG}）
+        flag_value = str(raw_global.get("FLAG") or "")
+        if flag_value.strip():
+            filtered_global["FLAG"] = flag_value
+        elif "FLAG" in filtered_global:
+            # 空值/空白视为未下发：移除后由占位符逻辑生成随机 flag，并触发 warning
             filtered_global.pop("FLAG", None)
     else:
         # 单 service：完整透传，即使 compose 未写 ${FLAG}
