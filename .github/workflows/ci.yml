@@ -60,8 +60,8 @@ jobs:
         run: |
           docker run -d --name moegate-ci \
             -v /var/run/docker.sock:/var/run/docker.sock \
-            -e API_KEY=test-secret-api-key-for-ci-minimum-32-chars \
-            -e API_SESSION_SECRET=test-session-secret-distinct-from-api-key \
+            -e API_KEY=Zk8vQw3nXr7LpT2yHb9sMd4fGj6aEu5N \
+            -e API_SESSION_SECRET=Rv5bKx9wQm2nLt7yPd3sHf8gJa4eUz6C \
             -e ALLOWED_BASE_DIR=/data/containers \
             -e SHUTDOWN_DESTROY_CONTAINERS=false \
             -p 18080:8080 \
@@ -92,7 +92,7 @@ jobs:
           fi
 
           # Authenticated status endpoint
-          curl -fsS -H "X-API-Key: test-secret-api-key-for-ci-minimum-32-chars" \
+          curl -fsS -H "X-API-Key: Zk8vQw3nXr7LpT2yHb9sMd4fGj6aEu5N" \
             http://127.0.0.1:18080/api/v1/status | grep -qi 'app_version'
 
       - name: Trivy image scan
