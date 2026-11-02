@@ -7,7 +7,7 @@ from typing import Dict, Any, Optional, Sequence
 
 from config import config
 from infra.docker import ensure_client
-from utils.url_validator import post_webhook_json
+from utils.url_validator import mask_webhook_url, post_webhook_json
 
 logger = logging.getLogger(__name__)
 
@@ -343,5 +343,13 @@ def send_alert_message(
         logger.warning("告警发送失败，HTTP %s: %s", resp.status, response_text)
         return False
     except Exception as e:
-        logger.warning("告警发送异常: %s", e)
+        # urllib3 的异常文本会带上完整/相对 URL（飞书 bot token 就在路径末段），
+        # 不能原样写日志，否则告警通道的写权限会随日志一起泄露。
+        message = str(e)
+        if url:
+            message = message.replace(url, mask_webhook_url(url))
+            token = url.rstrip("/").rsplit("/", 1)[-1]
+            if token and len(token) >= 8:
+                message = message.replace(token, "***")
+        logger.warning("告警发送异常: %s", message)
         return False

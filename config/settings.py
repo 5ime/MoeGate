@@ -2,6 +2,7 @@
 import ipaddress
 import os
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import List, Optional
 from dotenv import load_dotenv
@@ -150,6 +151,9 @@ class AppConfig:
     TRAFFIC_CAPTURE_FILTER: str = (os.getenv("TRAFFIC_CAPTURE_FILTER") or "").strip()
     TRAFFIC_CAPTURE_RETENTION_HOURS: int = _get_int_env("TRAFFIC_CAPTURE_RETENTION_HOURS", 168)
     TRAFFIC_CAPTURE_MEMORY_LIMIT: str = os.getenv("TRAFFIC_CAPTURE_MEMORY_LIMIT", "128m")
+    # 每个 capture_key（单机靶机 / compose 项目下的单个 service）允许占用的 pcap 总量；
+    # 0 表示不限制。tcpdump -C/-W 只约束单个进程，多次重启会累积，需要这层总配额。
+    TRAFFIC_CAPTURE_QUOTA_MB: int = _get_int_env("TRAFFIC_CAPTURE_QUOTA_MB", 1024)
 
     # 安全
     API_KEY: Optional[str] = os.getenv("API_KEY")
@@ -194,6 +198,9 @@ class AppConfig:
     LOG_FILE: Optional[str] = os.getenv("LOG_FILE")
     LOG_MAX_SIZE: str = os.getenv("LOG_MAX_SIZE", "10MB")
     LOG_BACKUP_COUNT: int = _get_int_env("LOG_BACKUP_COUNT", 5)
+    # 审计日志独立落盘（可选）。留空时与普通日志共用输出；
+    # 配置后 moegate.audit 只写该文件、不再混入应用日志，便于单独保全与留存。
+    AUDIT_LOG_FILE: Optional[str] = os.getenv("AUDIT_LOG_FILE") or None
 
     # 关闭时是否销毁所有受管容器（生产环境建议关闭）
     SHUTDOWN_DESTROY_CONTAINERS: bool = _get_bool_env("SHUTDOWN_DESTROY_CONTAINERS", False)
@@ -315,12 +322,16 @@ class AppConfig:
             raise ValueError("TRAFFIC_CAPTURE_DIR 不能为空")
         if self.TRAFFIC_CAPTURE_SNAPLEN < 0:
             raise ValueError("TRAFFIC_CAPTURE_SNAPLEN 不能为负数（0 表示抓取完整报文）")
+        if self.TRAFFIC_CAPTURE_SNAPLEN > 262144:
+            raise ValueError("TRAFFIC_CAPTURE_SNAPLEN 不能超过 262144（tcpdump 上限）")
         if self.TRAFFIC_CAPTURE_ROTATE_MB <= 0:
             raise ValueError("TRAFFIC_CAPTURE_ROTATE_MB 必须大于 0")
         if self.TRAFFIC_CAPTURE_MAX_FILES < 1:
             raise ValueError("TRAFFIC_CAPTURE_MAX_FILES 必须大于等于 1")
         if self.TRAFFIC_CAPTURE_RETENTION_HOURS < 0:
             raise ValueError("TRAFFIC_CAPTURE_RETENTION_HOURS 不能为负数（0 表示不自动清理）")
+        if self.TRAFFIC_CAPTURE_QUOTA_MB < 0:
+            raise ValueError("TRAFFIC_CAPTURE_QUOTA_MB 不能为负数（0 表示不限制单靶机总量）")
         if self.ENABLE_TRAFFIC_CAPTURE and not (self.TRAFFIC_CAPTURE_VOLUME or self.TRAFFIC_CAPTURE_HOST_DIR):
             raise ValueError(
                 "启用流量取证时必须配置 TRAFFIC_CAPTURE_VOLUME（Docker 卷）"
@@ -386,6 +397,13 @@ class AppConfig:
 
         if self.LOG_FORMAT not in ("text", "json"):
             raise ValueError("LOG_FORMAT 仅支持 text 或 json")
+
+        # 静默回退会带来真实风险：LOG_MAX_SIZE 写错可能变成 10 字节或 0（关掉轮转），
+        # LOG_BACKUP_COUNT=0 会在轮转时直接截断当前文件、不留任何审计历史。
+        if not re.fullmatch(r"\d+\s*[KMGT]?I?B?", str(self.LOG_MAX_SIZE or "").strip(), re.IGNORECASE):
+            raise ValueError("LOG_MAX_SIZE 格式非法，示例：10MB / 1GB / 512KB")
+        if int(self.LOG_BACKUP_COUNT or 0) < 1 or int(self.LOG_BACKUP_COUNT or 0) > 100:
+            raise ValueError("LOG_BACKUP_COUNT 必须在 1..100 之间")
 
         if self.COMPOSE_POLICY not in ("ctf", "strict"):
             raise ValueError("COMPOSE_POLICY 仅支持 ctf 或 strict")

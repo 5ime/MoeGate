@@ -1,9 +1,10 @@
 """API密钥认证装饰器"""
 import hmac
 import logging
+import re
 from functools import wraps
 from typing import Tuple
-from flask import request
+from flask import request, g
 from config import config
 from core.responses import error
 from middleware.ip import get_client_ip
@@ -22,6 +23,12 @@ from middleware.session import (
 logger = logging.getLogger(__name__)
 audit_logger = logging.getLogger("moegate.audit")
 
+# 证据读取（日志 / pcap 列表、摘要、下载）也必须留审计：它们是平台里最敏感的数据，
+# 且全部是 GET，旧实现只审计变更类请求，导致"谁导出了证据"无记录。
+_SENSITIVE_READ_RE = re.compile(
+    r"/api/v1/containers/[^/]+/(?:traffic(?:/[A-Za-z0-9_.-]+)?|logs(?:/stream)?)$"
+)
+
 
 def _extract_api_key() -> Tuple[str, str]:
     header_key = request.headers.get("X-API-Key")
@@ -37,12 +44,17 @@ def _extract_api_key() -> Tuple[str, str]:
 
 
 def _log_api_audit(auth_method: str) -> None:
-    """记录已认证 API 变更操作，便于事后追溯。"""
-    if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
+    """记录已认证 API 操作，便于事后追溯。
+
+    变更类请求全部记录；日志/pcap 证据读取（GET）也记录，其余 GET 走访问日志。
+    """
+    method = request.method.upper()
+    if method in {"GET", "HEAD", "OPTIONS"} and not _SENSITIVE_READ_RE.search(request.path):
         return
     audit_logger.info(
-        "API audit | ip=%s | method=%s | path=%s | auth=%s",
+        "API audit | ip=%s | request_id=%s | method=%s | path=%s | auth=%s",
         get_client_ip(),
+        getattr(g, "request_id", "-") or "-",
         request.method,
         request.path,
         auth_method,

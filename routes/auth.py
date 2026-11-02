@@ -102,7 +102,7 @@ def login_with_api_key():
     if not api_key:
         return error("缺少 api_key", 400)
     if not hmac.compare_digest(api_key, config.API_KEY):
-        logger.warning("Cookie 登录 API 密钥验证失败")
+        logger.warning("Cookie 登录 API 密钥验证失败 | 来源IP: %s", client_ip)
         record_auth_failure(client_ip)
         return error("API密钥无效", 401)
 

@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import time
 import uuid
 from flask import Flask, send_from_directory, g, request
 from flask_cors import CORS
@@ -13,6 +14,7 @@ from routes import api_bp
 from utils.static_assets import verify_static_build_info
 
 logger = logging.getLogger(__name__)
+access_logger = logging.getLogger("moegate.access")
 
 # 客户端可控的 X-Request-Id 只允许这些字符（其余一律丢弃）
 _UNSAFE_REQUEST_ID_CHARS = re.compile(r"[^A-Za-z0-9._-]")
@@ -58,6 +60,7 @@ def create_app():
     _register_event_handlers()
     app.register_blueprint(api_bp)
     _register_error_handlers(app)
+    _warn_traffic_capture_layout()
     if static_dir:
         _register_static_routes(app, static_dir)
     else:
@@ -75,6 +78,31 @@ def create_app():
 
 
 
+def _warn_traffic_capture_layout():
+    """取证目录布局自检。
+
+    sidecar 抓得到、MoeGate 读不到，是这套功能最难自查的故障（UI 只会显示"0 个文件"），
+    启动时就把配置层面的原因讲清楚。
+    """
+    try:
+        from services.container import tap
+    except Exception as exc:  # pragma: no cover - 导入失败不该拖垮启动
+        logger.debug("跳过取证目录自检: %s", exc)
+        return
+    try:
+        if not tap.is_enabled() or tap.capture_root().is_dir():
+            return
+    except Exception as exc:  # pragma: no cover
+        logger.debug("取证目录自检失败: %s", exc)
+        return
+    logger.warning(
+        "流量取证已启用，但 MoeGate 读不到取证根目录 %s（storage=%s）："
+        "卷模式下 MoeGate 必须与 sidecar 挂载同一个卷，裸机部署请改用 TRAFFIC_CAPTURE_HOST_DIR",
+        tap.capture_root(),
+        tap.capture_mode(),
+    )
+
+
 def _register_request_id_hook(app):
     @app.before_request
     def assign_request_id():
@@ -83,6 +111,7 @@ def _register_request_id_hook(app):
         incoming = request.headers.get("X-Request-Id")
         candidate = _UNSAFE_REQUEST_ID_CHARS.sub("", (incoming or "").strip())[:64]
         g.request_id = candidate or str(uuid.uuid4())[:8]
+        g.start_time = time.perf_counter()
 
     @app.after_request
     def attach_request_id(response):
@@ -98,7 +127,36 @@ def _register_request_id_hook(app):
                 "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
                 "script-src 'self'; connect-src 'self'",
             )
+        _log_access(response, request_id)
         return response
+
+
+def _log_access(response, request_id):
+    """生产环境也保留逐请求访问日志。
+
+    这是取证/审计的下限：没有 method/path/status/来源 IP，事后无法回答
+    「谁在什么时候下载了哪个 pcap」。健康检查与静态资源单独排除，避免刷屏。
+    """
+    path = str(getattr(request, "path", "") or "")
+    if path in ("/healthz", "/favicon.ico") or path.startswith("/static/"):
+        return
+    try:
+        from middleware.ip import get_client_ip
+
+        client_ip = get_client_ip()
+    except Exception:
+        client_ip = "unknown"
+    started = getattr(g, "start_time", None)
+    duration_ms = (time.perf_counter() - started) * 1000.0 if started else -1.0
+    access_logger.info(
+        "API access | ip=%s | request_id=%s | method=%s | path=%s | status=%s | duration_ms=%.1f",
+        client_ip,
+        request_id or "-",
+        request.method,
+        path,
+        getattr(response, "status_code", "-"),
+        duration_ms,
+    )
 
 
 def _register_health_route(app):
