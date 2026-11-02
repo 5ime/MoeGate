@@ -86,6 +86,46 @@ def blocked_volume_reason(volume_spec: str) -> Optional[str]:
     return None
 
 
+def collect_risky_compose_fields(services: Dict[str, Any]) -> List[str]:
+    """收集"能跑但很危险"的字段。
+
+    strict 模式下这些由 `validate_compose_policy` 直接拒绝；ctf 模式放行，
+    但必须显式提示出来——以前是静默生效，出了事故无从追溯。
+    """
+    warnings: List[str] = []
+    if not isinstance(services, dict):
+        return warnings
+
+    for service_name, service in services.items():
+        if not isinstance(service, dict):
+            continue
+        if service.get("privileged") is True:
+            warnings.append(f"服务 {service_name}: privileged=true，容器几乎等同宿主机 root")
+
+        network_mode = str(service.get("network_mode") or "").strip().lower()
+        if network_mode in _BLOCKED_HOST_MODES:
+            warnings.append(f"服务 {service_name}: network_mode=host，不受端口池与受管网络约束")
+
+        for mode_name in ("ipc", "pid"):
+            mode = str(service.get(mode_name) or "").strip().lower()
+            if mode in _BLOCKED_IPC:
+                warnings.append(f"服务 {service_name}: {mode_name}=host，与宿主机共享命名空间")
+
+        cap_add = service.get("cap_add") or []
+        if isinstance(cap_add, (list, tuple, set)):
+            dangerous = [
+                str(cap or "").strip().upper()
+                for cap in cap_add
+                if str(cap or "").strip().upper() in _DANGEROUS_CAPS
+            ]
+            if dangerous:
+                warnings.append(
+                    f"服务 {service_name}: cap_add 含高危能力 {', '.join(sorted(set(dangerous)))}"
+                )
+
+    return warnings
+
+
 def collect_unsupported_compose_fields(services: Dict[str, Any]) -> List[str]:
     """收集 YAML 中存在但 MoeGate SDK 编排不会执行的字段。"""
     warnings: List[str] = []
@@ -158,9 +198,11 @@ def prepare_compose_services_policy(
     if policy_error:
         return [], policy_error
 
-    warnings = collect_unsupported_compose_fields(services)
-    if warnings and compose_unsupported_error():
-        return warnings, "; ".join(warnings)
+    unsupported = collect_unsupported_compose_fields(services)
+    risky = collect_risky_compose_fields(services)
+    warnings = unsupported + risky
+    if unsupported and compose_unsupported_error():
+        return warnings, "; ".join(unsupported)
     return warnings, None
 
 
