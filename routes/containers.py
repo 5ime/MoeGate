@@ -1,6 +1,6 @@
 """容器管理路由"""
 import logging
-from flask import Blueprint, request, g, Response
+from flask import Blueprint, request, g, Response, send_file
 from services.container import (
     start_container,
     start_container_streaming,
@@ -28,6 +28,7 @@ from middleware import (
 )
 from core.route_helpers import handle_service_call
 from core.sse_helpers import iter_sse_events
+from core.responses import error, success
 from config import config
 
 bp = Blueprint("containers", __name__, url_prefix="/api/v1")
@@ -234,3 +235,85 @@ def renew_container(container_id: str):
     dto = {"container_id": container_id}
     return handle_service_call(renew_task, "容器续期成功", 200, dto, app_config=config)
 
+
+
+@bp.route("/containers/<container_id>/traffic", methods=["GET"])
+@require_api_key
+@log_request("获取容器流量取证状态")
+@rate_limit(max_per_min=60)
+def get_container_traffic(container_id: str):
+    """查看取证 sidecar 状态与已落盘 pcap 列表。"""
+    from services.container.tap import get_capture_status
+
+    return handle_service_call(get_capture_status, "获取流量取证信息成功", 200, container_id)
+
+
+@bp.route("/containers/<container_id>/traffic/summary", methods=["GET"])
+@require_api_key
+@log_request("生成容器流量取证摘要")
+@rate_limit(max_per_min=20)
+def get_container_traffic_summary(container_id: str):
+    """基于 pcap 生成取证摘要（HTTP 明文、客户端画像、自动化特征）。"""
+    from services.container.tap import get_capture_summary
+
+    try:
+        max_packets = int(request.args.get("max_packets", 50000))
+    except (TypeError, ValueError):
+        max_packets = 50000
+    try:
+        max_http = int(request.args.get("max_http", 200))
+    except (TypeError, ValueError):
+        max_http = 200
+
+    max_packets = min(max(max_packets, 1000), 500000)
+    max_http = min(max(max_http, 0), 2000)
+
+    return handle_service_call(
+        get_capture_summary,
+        "生成流量取证摘要成功",
+        200,
+        container_id,
+        max_packets,
+        max_http,
+    )
+
+
+@bp.route("/containers/<container_id>/traffic/start", methods=["POST"])
+@require_api_key
+@log_request("开启容器流量取证")
+@rate_limit(max_per_min=30)
+def start_container_traffic(container_id: str):
+    """手动开启取证（默认在容器创建时自动开启）。"""
+    from services.container.tap import start_capture
+
+    return handle_service_call(start_capture, "流量取证已开启", 200, container_id)
+
+
+@bp.route("/containers/<container_id>/traffic/stop", methods=["POST"])
+@require_api_key
+@log_request("停止容器流量取证")
+@rate_limit(max_per_min=30)
+def stop_container_traffic(container_id: str):
+    """停止取证 sidecar，已抓取的 pcap 保留。"""
+    from services.container.tap import stop_capture
+
+    return handle_service_call(stop_capture, "流量取证已停止", 200, container_id)
+
+
+@bp.route("/containers/<container_id>/traffic/<path:filename>", methods=["GET"])
+@require_api_key
+@log_request("下载容器流量 pcap")
+@rate_limit(max_per_min=30)
+def download_container_traffic(container_id: str, filename: str):
+    """下载指定 pcap 文件。"""
+    from services.container.tap import resolve_capture_file
+
+    path = resolve_capture_file(container_id, filename)
+    if path is None:
+        return error("流量文件不存在", 404)
+    return send_file(
+        str(path),
+        mimetype="application/vnd.tcpdump.pcap",
+        as_attachment=True,
+        download_name=path.name,
+    )

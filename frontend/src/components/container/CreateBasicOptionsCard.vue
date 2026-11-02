@@ -75,6 +75,27 @@ const props = defineProps({
 
         <p class="mt-2 text-xs leading-relaxed text-slate-500">{{ props.form.source === 'image' ? '填写后，容器会加入所选 Docker network；留空则使用默认 bridge。' : '识别为 Dockerfile 时加入所选网络；识别为 Compose 时忽略此项，由 Compose 网络自动管理。' }}</p>
       </div>
+
+      <div class="md:col-span-2">
+        <label for="trafficCaptureSelect" class="mb-2 block text-xs font-medium text-slate-600">流量取证</label>
+        <div class="relative">
+          <select
+            id="trafficCaptureSelect"
+            v-model="props.form.traffic_capture"
+            class="w-full appearance-none rounded-xl border border-slate-200 bg-white px-3 py-2 pr-10 text-sm text-slate-900 outline-none transition focus:border-slate-400"
+          >
+            <option value="">跟随服务端默认</option>
+            <option value="on">录制（考试场次留证）</option>
+            <option value="off">不录制（省磁盘与隐私面）</option>
+          </select>
+          <div class="pointer-events-none absolute inset-y-0 right-0 flex items-center pr-3 text-slate-500">
+            <svg class="h-4 w-4" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true"><path fill-rule="evenodd" d="M5.23 7.21a.75.75 0 011.06.02L10 10.94l3.71-3.71a.75.75 0 111.06 1.06l-4.24 4.24a.75.75 0 01-1.06 0L5.21 8.29a.75.75 0 01.02-1.08z" clip-rule="evenodd" /></svg>
+          </div>
+        </div>
+        <p class="mt-2 text-xs leading-relaxed text-slate-500">
+          选择"录制"后，容器会附带 tcpdump sidecar 把流量落盘为 pcap；服务端未开启取证能力时会直接报错，不会静默降级。
+        </p>
+      </div>
     </div>
   </div>
 </template>

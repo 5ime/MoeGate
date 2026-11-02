@@ -15,9 +15,12 @@ services:
       API_DEBUG: "false"
       ALLOWED_BASE_DIR: ${ALLOWED_BASE_DIR:-/data/containers}
       SHUTDOWN_DESTROY_CONTAINERS: "false"
+      # 流量取证落盘目录（与下方 moegate-captures 卷保持一致，便于 MoeGate 读取下载）
+      TRAFFIC_CAPTURE_DIR: ${TRAFFIC_CAPTURE_DIR:-/data/captures}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - moegate-data:${ALLOWED_BASE_DIR:-/data/containers}
+      - moegate-captures:${TRAFFIC_CAPTURE_DIR:-/data/captures}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/healthz"]
       interval: 30s
@@ -27,3 +30,5 @@ services:
 
 volumes:
   moegate-data:
+  # 取证 pcap 共享卷：MoeGate 读、tap sidecar 写
+  moegate-captures:

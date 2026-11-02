@@ -3,6 +3,7 @@ import { inject, toRef } from 'vue';
 import ConfirmModal from '../ConfirmModal.vue';
 import ObjectDetailModal from '../ObjectDetailModal.vue';
 import SearchSelectBar from '../SearchSelectBar.vue';
+import TrafficForensicsModal from '../container/TrafficForensicsModal.vue';
 import StatCard from '../ui/StatCard.vue';
 import { useContainersTab } from '../../composables/useContainersTab';
 
@@ -26,6 +27,9 @@ const {
   errorText,
   matchesKey,
   detailModal,
+  forensicsModal,
+  openForensics,
+  closeForensics,
   getStatusClass,
   visibleContainers,
   hasSearchKeyword,
@@ -144,6 +148,9 @@ const {
             <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-900 bg-slate-900 px-3 text-xs font-medium text-white transition hover:border-slate-700 hover:bg-slate-700 active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="viewContainer(item.id)">
               详情
             </button>
+            <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="openForensics(item)" title="流量取证：pcap 下载与自动化信号">
+              取证
+            </button>
             <button class="inline-flex h-8 items-center justify-center gap-1.5 rounded-[10px] border border-slate-200 bg-white px-3 text-xs font-medium text-slate-900 transition hover:border-[#d2d5dc] hover:bg-[#fbfbfc] active:translate-y-[0.5px] disabled:cursor-not-allowed disabled:opacity-55" :disabled="actionPending" @click="restartManagedContainer(item.id)" title="重启容器">
               重启
             </button>
@@ -192,6 +199,12 @@ const {
       :data="detailModal.data"
       :mode="detailModal.mode"
       @close="closeDetail"
+    />
+
+    <TrafficForensicsModal
+      :visible="forensicsModal.open"
+      :container="forensicsModal.container"
+      @close="closeForensics"
     />
 
     <ConfirmModal

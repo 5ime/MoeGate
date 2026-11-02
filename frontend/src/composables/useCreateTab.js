@@ -30,6 +30,7 @@ export function useCreateTab() {
     cpu_limit: '',
     cpu_shares: '',
     envText: '',
+    traffic_capture: '',
   });
 
   const showBuildModal = ref(false);
@@ -97,6 +98,9 @@ export function useCreateTab() {
     if (form.memory_limit.trim()) payload.memory_limit = form.memory_limit.trim();
     if (form.cpu_limit) payload.cpu_limit = Number(form.cpu_limit);
     if (form.cpu_shares) payload.cpu_shares = Number(form.cpu_shares);
+    // 流量取证三态：不传=按服务端默认；on/off=显式写入容器标签
+    if (form.traffic_capture === 'on') payload.traffic_capture = true;
+    if (form.traffic_capture === 'off') payload.traffic_capture = false;
 
     try {
       if (form.envText.trim()) {
@@ -128,6 +132,7 @@ export function useCreateTab() {
     form.cpu_limit = String(settings.value.containerDefaults.cpuLimit ?? 1.0);
     form.cpu_shares = String(settings.value.containerDefaults.cpuShares ?? 1024);
     form.envText = '';
+    form.traffic_capture = '';
   }
 
   async function loadContainerDefaults() {

@@ -80,6 +80,19 @@ def _normalize_source_mode(data: Dict[str, Any]) -> str:
     raise ValidationError("缺少必要字段: path 或 image")
 
 
+# 资源上限护栏：请求里能带 memory_limit / cpu_limit，若完全不设边界，
+# 一次请求就能要走整机资源（或把非法字符串直接喂给 Docker 拿到 500）。
+_MEMORY_LIMIT_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([bkmg]b?)?$", re.IGNORECASE)
+_MEMORY_UNIT_BYTES = {
+    "": 1, "b": 1,
+    "k": 1024, "kb": 1024,
+    "m": 1024 ** 2, "mb": 1024 ** 2,
+    "g": 1024 ** 3, "gb": 1024 ** 3,
+}
+_MAX_MEMORY_BYTES = 64 * 1024 ** 3
+_MAX_CPU_CORES = 64.0
+
+
 def _extract_resource_limits(data: Dict[str, Any]) -> Dict[str, Any]:
     resource_limits: Dict[str, Any] = {}
 
@@ -88,6 +101,15 @@ def _extract_resource_limits(data: Dict[str, Any]) -> Dict[str, Any]:
         memory_limit = str(memory_limit).strip()
         if not memory_limit:
             raise ValidationError("memory_limit 不能为空")
+        match = _MEMORY_LIMIT_RE.match(memory_limit)
+        if not match:
+            raise ValidationError("memory_limit 格式非法，示例: 512m / 2g / 1048576")
+        amount = float(match.group(1))
+        unit = (match.group(2) or "").lower()
+        if amount * _MEMORY_UNIT_BYTES[unit] > _MAX_MEMORY_BYTES:
+            raise ValidationError(
+                f"memory_limit 超过单容器上限 {_MAX_MEMORY_BYTES // (1024 ** 3)}G"
+            )
         resource_limits["memory_limit"] = memory_limit
 
     cpu_limit_raw = data.get("cpu_limit")
@@ -98,6 +120,8 @@ def _extract_resource_limits(data: Dict[str, Any]) -> Dict[str, Any]:
             raise ValidationError("cpu_limit 必须是数字")
         if cpu_limit <= 0:
             raise ValidationError("cpu_limit 必须大于 0")
+        if cpu_limit > _MAX_CPU_CORES:
+            raise ValidationError(f"cpu_limit 超过单容器上限 {_MAX_CPU_CORES:g} 核")
         resource_limits["cpu_limit"] = cpu_limit
 
     cpu_shares_raw = data.get("cpu_shares")
@@ -236,6 +260,28 @@ def _validate_max_time(raw: object, app_config: AppConfig) -> int:
     return max_time
 
 
+def _validate_traffic_capture(value) -> Optional[bool]:
+    """校验创建参数 traffic_capture。
+
+    - 未传：None，由全局 TRAFFIC_CAPTURE_DEFAULT 决定；
+    - false：本靶机明确不抓包（不占额外资源）；
+    - true ：明确抓包，但服务端未开启取证能力时直接报错，避免"以为在录其实没录"。
+    """
+    from services.container.tap import is_enabled, normalize_capture_flag
+
+    try:
+        flag = normalize_capture_flag(value)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+
+    if flag and not is_enabled():
+        raise ValidationError(
+            "服务端未启用流量取证能力（ENABLE_TRAFFIC_CAPTURE=false），"
+            "无法对该容器开启 traffic_capture"
+        )
+    return flag
+
+
 def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
     """提取并验证容器启动参数
     
@@ -276,6 +322,8 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
     if port_mappings and (has_min_port or has_max_port):
         raise ValidationError("port_mappings 与 min_port/max_port 只能二选一")
 
+    traffic_capture = _validate_traffic_capture(data.get("traffic_capture"))
+
     allowed_min = int(app_config.MIN_PORT)
     allowed_max = int(app_config.MAX_PORT)
     min_port = int(data.get("min_port", allowed_min))
@@ -315,6 +363,7 @@ def extract_and_validate_data(data: Dict[str, Any], app_config: AppConfig = None
         "resource_limits": resource_limits,
         "port_mappings": port_mappings,
         "network": network,
+        "traffic_capture": traffic_capture,
     }
 
 
@@ -399,6 +448,46 @@ def _apply_frp_configs(response_data, request_data: Dict[str, Any], app_config: 
         logger.exception("FRP配置异常详情")
 
 
+def _apply_traffic_capture(response_data, app_config: AppConfig) -> None:
+    """创建后为每个容器拉起流量取证 sidecar（旁路能力，失败不影响靶机）。"""
+    if not getattr(app_config, "ENABLE_TRAFFIC_CAPTURE", False):
+        return
+
+    containers = _normalize_container_results(response_data)
+    if not containers:
+        return
+
+    container_ids = [item.get("container_id") for item in containers if item.get("container_id")]
+    if not container_ids:
+        return
+
+    try:
+        from services.container.tap import start_taps_for
+
+        results = start_taps_for(container_ids)
+    except Exception as exc:
+        logger.warning("流量取证启动失败（靶机不受影响）: %s", exc)
+        return
+
+    result_by_id = {
+        str(container_id): result
+        for container_id, result in zip(container_ids, results)
+    }
+
+    for container_info in containers:
+        result = result_by_id.get(str(container_info.get("container_id") or ""))
+        if not result:
+            # 显式关了取证（或 sidecar 没起来）：不假装在录，交给 WebUI 如实展示
+            container_info["traffic_capture"] = {"enabled": False}
+            continue
+        container_info["traffic_capture"] = {
+            "enabled": True,
+            "capture_key": result.get("capture_key"),
+            "tap_container_id": result.get("tap_container_id"),
+            "capture_dir": result.get("capture_dir"),
+        }
+
+
 def start_container(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[str, Any]:
     """启动容器
     
@@ -438,6 +527,8 @@ def start_container(data: Dict[str, Any], app_config: AppConfig = None) -> Dict[
         raise
 
     _apply_frp_configs(response_data, data, app_config)
+    _apply_traffic_capture(response_data, app_config)
+    manager.consume_reservation(slots=slots)
     return response_data
 
 
@@ -475,10 +566,14 @@ def start_container_streaming(data, app_config=None):
                 response_data = item
             else:
                 yield item
-    except Exception:
+    except (GeneratorExit, Exception):
+        # GeneratorExit 不是 Exception 的子类：客户端中断 SSE 时会抛出它，
+        # 少了这一支，名额与共享预留就永远不会被回收。
         manager.release_reservation(slots=slots)
         raise
 
     _apply_frp_configs(response_data, data, app_config)
+    _apply_traffic_capture(response_data, app_config)
+    manager.consume_reservation(slots=slots)
     yield response_data
 

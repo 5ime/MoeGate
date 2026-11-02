@@ -134,6 +134,20 @@ def _resolve_managed_container(container_id: str):
     return container
 
 
+def _restart_traffic_tap(container) -> None:
+    """容器重启后重建取证 sidecar。
+
+    `network_mode=container:<id>` 绑定的是启动时刻的 netns，目标容器重启后
+    旧 sidecar 会留在已销毁的命名空间里，必须重建才能继续取证。
+    """
+    try:
+        from services.container.tap import start_tap
+
+        start_tap(container)
+    except Exception as exc:
+        logger.warning("重启后重建流量取证失败（靶机不受影响）: %s", exc)
+
+
 def restart_container(data: Dict[str, Any]) -> Dict[str, Any]:
     """重启容器
     
@@ -156,6 +170,7 @@ def restart_container(data: Dict[str, Any]) -> Dict[str, Any]:
 
     if container:
         container.restart()
+        _restart_traffic_tap(container)
         return {
             "container_id": container.id,
             "restart_time": datetime.now().isoformat(),
@@ -422,6 +437,7 @@ def restart_compose_project(data: Dict[str, Any]) -> Dict[str, Any]:
     for container in containers:
         container.restart()
         manager.add_container(container.id, container, consume_reservation=False)
+        _restart_traffic_tap(container)
         restarted_ids.append(container.id)
 
     return {

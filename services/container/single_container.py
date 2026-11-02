@@ -9,6 +9,7 @@ import docker
 from config.settings import AppConfig, config as default_config
 from core.exceptions import DockerConnectionError, ImageBuildError, PortUnavailableError
 from infra.docker import ensure_client
+from infra.docker_retry import docker_call
 from services.container.container_create import (
     _build_explicit_port_bindings,
     _extract_host_ports_from_bindings,
@@ -54,6 +55,7 @@ def start_from_image(
     meta: Optional[Dict[str, Any]] = None,
     network: Optional[str] = None,
     app_config: AppConfig = None,
+    traffic_capture: Optional[bool] = None,
     **_extra,
 ) -> Dict[str, Any]:
     """直接使用现有镜像启动容器。"""
@@ -92,12 +94,15 @@ def start_from_image(
         app_config=app_config,
         ttl_seconds=max_time,
         creation_meta=meta,
+        traffic_capture=traffic_capture,
     )
 
     reserved_ports = _extract_host_ports_from_bindings(ports)
 
     try:
-        container = client.containers.create(**create_kwargs)
+        container = docker_call(
+            lambda: client.containers.create(**create_kwargs), label="创建容器"
+        )
     except docker.errors.APIError as e:
         for reserved_port in reserved_ports:
             release_port(reserved_port)
@@ -108,7 +113,7 @@ def start_from_image(
         raise ImageBuildError(f"创建容器失败: {e}")
 
     try:
-        container.start()
+        docker_call(container.start, label="启动容器")
         for reserved_port in reserved_ports:
             release_port(reserved_port)
     except Exception as e:
@@ -151,6 +156,7 @@ def start_from_image_streaming(
     meta=None,
     network: Optional[str] = None,
     app_config: AppConfig = None,
+    traffic_capture: Optional[bool] = None,
     **_extra,
 ):
     """直接使用镜像启动容器（流式版本）。"""
@@ -203,12 +209,15 @@ def start_from_image_streaming(
         app_config=app_config,
         ttl_seconds=max_time,
         creation_meta=meta,
+        traffic_capture=traffic_capture,
     )
     reserved_ports = _extract_host_ports_from_bindings(ports)
 
     yield "正在创建容器..."
     try:
-        container = client.containers.create(**create_kwargs)
+        container = docker_call(
+            lambda: client.containers.create(**create_kwargs), label="创建容器"
+        )
     except Exception as e:
         for p in reserved_ports:
             release_port(p)
@@ -216,7 +225,7 @@ def start_from_image_streaming(
 
     yield "正在启动容器..."
     try:
-        container.start()
+        docker_call(container.start, label="启动容器")
         for p in reserved_ports:
             release_port(p)
     except Exception as e:
@@ -261,6 +270,7 @@ def start_from_dockerfile(
     meta: Optional[Dict[str, Any]] = None,
     network: Optional[str] = None,
     app_config: AppConfig = None,
+    traffic_capture: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """从 Dockerfile 启动容器。"""
     if app_config is None:
@@ -298,12 +308,15 @@ def start_from_dockerfile(
         app_config=app_config,
         ttl_seconds=max_time,
         creation_meta=meta,
+        traffic_capture=traffic_capture,
     )
 
     reserved_ports = _extract_host_ports_from_bindings(ports)
 
     try:
-        container = client.containers.create(**create_kwargs)
+        container = docker_call(
+            lambda: client.containers.create(**create_kwargs), label="创建容器"
+        )
     except docker.errors.APIError as e:
         for reserved_port in reserved_ports:
             release_port(reserved_port)
@@ -316,7 +329,7 @@ def start_from_dockerfile(
         raise ImageBuildError(f"创建容器失败: {e}")
 
     try:
-        container.start()
+        docker_call(container.start, label="启动容器")
         for reserved_port in reserved_ports:
             release_port(reserved_port)
     except (docker.errors.APIError, Exception) as e:
@@ -361,6 +374,7 @@ def _start_from_dockerfile_streaming(
     meta=None,
     network: Optional[str] = None,
     app_config: AppConfig = None,
+    traffic_capture: Optional[bool] = None,
 ):
     """从 Dockerfile 启动容器（流式版本）。"""
     if app_config is None:
@@ -410,12 +424,15 @@ def _start_from_dockerfile_streaming(
         app_config=app_config,
         ttl_seconds=max_time,
         creation_meta=meta,
+        traffic_capture=traffic_capture,
     )
     reserved_ports = _extract_host_ports_from_bindings(ports)
 
     yield "正在创建容器..."
     try:
-        container = client.containers.create(**create_kwargs)
+        container = docker_call(
+            lambda: client.containers.create(**create_kwargs), label="创建容器"
+        )
     except Exception as e:
         for p in reserved_ports:
             release_port(p)
@@ -423,7 +440,7 @@ def _start_from_dockerfile_streaming(
 
     yield "正在启动容器..."
     try:
-        container.start()
+        docker_call(container.start, label="启动容器")
         for p in reserved_ports:
             release_port(p)
     except Exception as e:

@@ -35,6 +35,15 @@ export function useContainersTab({ containers }) {
   const { errorText, setError, clearError, matchesKey } = useInlineError();
 
   const detailModal = ref({ open: false, title: '', data: null, loading: false, mode: '' });
+  const forensicsModal = ref({ open: false, container: null });
+
+  function openForensics(item) {
+    forensicsModal.value = { open: true, container: item || null };
+  }
+
+  function closeForensics() {
+    forensicsModal.value = { open: false, container: null };
+  }
 
   function getStatusClass(status) {
     const s = String(status || '').toLowerCase();
@@ -320,6 +329,9 @@ export function useContainersTab({ containers }) {
     errorText,
     matchesKey,
     detailModal,
+    forensicsModal,
+    openForensics,
+    closeForensics,
     getStatusClass,
     visibleContainers,
     hasSearchKeyword,

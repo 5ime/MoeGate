@@ -30,6 +30,7 @@
 - SSE 流式日志：构建和拉取镜像过程实时输出
 - 告警 Webhook：支持通用 JSON 与飞书机器人卡片（`POST /api/v1/alerts/test` 手动测试）
 - 受管镜像：自动登记、悬空清理、引用关系约束
+- **流量取证**：每个靶机可附带共享 netns 的 tcpdump sidecar，pcap 落盘 + 摘要 + 自动化信号告警；支持按请求参数 `traffic_capture` 逐台开关，WebUI 内置取证面板（时间线 + pcap 下载）
 
 ### 安全与隔离
 
@@ -73,6 +74,7 @@ utils/                  # 销毁任务、端口工具、路径校验、告警、
 frontend/               # Vue 3 WebUI 源码
 static/                 # WebUI 构建产物
 deploy/compose/         # Docker Compose 叠加示例（FRP、Socket Proxy）
+deploy/tap/             # 流量取证 sidecar 镜像（alpine + tcpdump）
 ```
 
 ## API
@@ -133,6 +135,8 @@ services:
 | [docs/SECURITY.md](docs/SECURITY.md) | 安全说明与威胁模型 |
 | [docs/frp.md](docs/frp.md) | FRP 穿透配置 |
 | [docs/compose.md](docs/compose.md) | Compose 变量替换机制 |
+| [docs/traffic-capture.md](docs/traffic-capture.md) | 流量取证：pcap 抓取、摘要接口与取证工作流 |
+| [docs/concurrency.md](docs/concurrency.md) | 并发模型、锁的职责边界与几条关键契约 |
 | [deploy/compose/README.md](deploy/compose/README.md) | Docker Compose 叠加示例（Socket Proxy、FRP） |
 
 ## FAQ

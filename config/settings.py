@@ -56,10 +56,30 @@ def _get_csv_env(key: str, default: Optional[str] = None) -> list:
     return [item.strip() for item in raw.split(",") if item.strip()]
 
 
+# 只查长度是不够的：`test-secret-api-key-for-ci-minimum-32-chars` 有 41 字符照样通过。
+# 这些词一旦出现在密钥里，说明它是从示例/CI 里照抄的，等同于公开值。
+_WEAK_SECRET_MARKERS = (
+    "test", "ci", "example", "changeme", "change-me", "secret", "password",
+    "placeholder", "your_", "todo", "demo", "sample", "default", "moegate",
+)
+
+
 def _validate_production_secret(name: str, value: Optional[str]) -> None:
     secret = str(value or "")
     if len(secret) < 32:
         raise ValueError(f"生产环境 {name} 长度不足 32 字符，请使用安全随机生成的密钥")
+
+    lowered = secret.lower()
+    for marker in _WEAK_SECRET_MARKERS:
+        if marker in lowered:
+            raise ValueError(
+                f"生产环境 {name} 含有示例/测试用特征词（{marker}），"
+                "疑似沿用默认值，请用 `python -c \"import secrets;print(secrets.token_urlsafe(32))\"` 重新生成"
+            )
+
+    # 全是同一个字符、或字符种类过少（如 32 个 a）也应拒绝
+    if len(set(secret)) < 8:
+        raise ValueError(f"生产环境 {name} 字符多样性不足，请使用随机生成的密钥")
 
 
 @dataclass
@@ -115,6 +135,21 @@ class AppConfig:
     FRP_USE_DOMAIN: bool = _get_bool_env("FRP_USE_DOMAIN", False)
     FRP_VHOST_HTTP_PORT: Optional[int] = _get_int_env_optional("FRP_VHOST_HTTP_PORT", None)
     FRP_LOCAL_IP: str = os.getenv("FRP_LOCAL_IP", "127.0.0.1")
+
+    # 流量取证（为每个靶机拉起共享 netns 的 tcpdump sidecar，pcap 落盘留证）
+    ENABLE_TRAFFIC_CAPTURE: bool = _get_bool_env("ENABLE_TRAFFIC_CAPTURE", False)
+    # 全局能力打开后，未显式指定 traffic_capture 的容器是否默认抓包（默认不抓）
+    TRAFFIC_CAPTURE_DEFAULT: bool = _get_bool_env("TRAFFIC_CAPTURE_DEFAULT", False)
+    TRAFFIC_CAPTURE_IMAGE: str = os.getenv("TRAFFIC_CAPTURE_IMAGE", "moegate-tap:latest")
+    TRAFFIC_CAPTURE_VOLUME: Optional[str] = os.getenv("TRAFFIC_CAPTURE_VOLUME", "moegate-captures") or None
+    TRAFFIC_CAPTURE_HOST_DIR: Optional[str] = os.getenv("TRAFFIC_CAPTURE_HOST_DIR") or None
+    TRAFFIC_CAPTURE_DIR: str = os.getenv("TRAFFIC_CAPTURE_DIR", "/data/captures")
+    TRAFFIC_CAPTURE_SNAPLEN: int = _get_int_env("TRAFFIC_CAPTURE_SNAPLEN", 0)
+    TRAFFIC_CAPTURE_ROTATE_MB: int = _get_int_env("TRAFFIC_CAPTURE_ROTATE_MB", 64)
+    TRAFFIC_CAPTURE_MAX_FILES: int = _get_int_env("TRAFFIC_CAPTURE_MAX_FILES", 8)
+    TRAFFIC_CAPTURE_FILTER: str = (os.getenv("TRAFFIC_CAPTURE_FILTER") or "").strip()
+    TRAFFIC_CAPTURE_RETENTION_HOURS: int = _get_int_env("TRAFFIC_CAPTURE_RETENTION_HOURS", 168)
+    TRAFFIC_CAPTURE_MEMORY_LIMIT: str = os.getenv("TRAFFIC_CAPTURE_MEMORY_LIMIT", "128m")
 
     # 安全
     API_KEY: Optional[str] = os.getenv("API_KEY")
@@ -269,6 +304,28 @@ class AppConfig:
                 raise ValueError("启用FRP时必须配置 FRP_SERVER_ADDR")
             if self.FRP_USE_DOMAIN and not self.FRP_DOMAIN_SUFFIX:
                 raise ValueError("使用域名访问时必须配置 FRP_DOMAIN_SUFFIX")
+
+        # 流量取证
+        if self.TRAFFIC_CAPTURE_HOST_DIR is not None:
+            host_dir = str(self.TRAFFIC_CAPTURE_HOST_DIR).strip()
+            if host_dir and not os.path.isabs(host_dir):
+                raise ValueError("TRAFFIC_CAPTURE_HOST_DIR 必须是宿主机上的绝对路径")
+            self.TRAFFIC_CAPTURE_HOST_DIR = host_dir or None
+        if not str(self.TRAFFIC_CAPTURE_DIR or "").strip():
+            raise ValueError("TRAFFIC_CAPTURE_DIR 不能为空")
+        if self.TRAFFIC_CAPTURE_SNAPLEN < 0:
+            raise ValueError("TRAFFIC_CAPTURE_SNAPLEN 不能为负数（0 表示抓取完整报文）")
+        if self.TRAFFIC_CAPTURE_ROTATE_MB <= 0:
+            raise ValueError("TRAFFIC_CAPTURE_ROTATE_MB 必须大于 0")
+        if self.TRAFFIC_CAPTURE_MAX_FILES < 1:
+            raise ValueError("TRAFFIC_CAPTURE_MAX_FILES 必须大于等于 1")
+        if self.TRAFFIC_CAPTURE_RETENTION_HOURS < 0:
+            raise ValueError("TRAFFIC_CAPTURE_RETENTION_HOURS 不能为负数（0 表示不自动清理）")
+        if self.ENABLE_TRAFFIC_CAPTURE and not (self.TRAFFIC_CAPTURE_VOLUME or self.TRAFFIC_CAPTURE_HOST_DIR):
+            raise ValueError(
+                "启用流量取证时必须配置 TRAFFIC_CAPTURE_VOLUME（Docker 卷）"
+                "或 TRAFFIC_CAPTURE_HOST_DIR（宿主机绝对路径）"
+            )
 
         # 规范化域名后缀：允许填写 ".example.com" 或 "example.com"，内部统一存为 "example.com"
         if self.FRP_DOMAIN_SUFFIX is not None:

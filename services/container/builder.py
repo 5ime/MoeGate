@@ -41,6 +41,7 @@ def start_container_from_source(file_path: str, app_config: AppConfig = None, **
             min_port=params.get('min_port'),
             max_port=params.get('max_port'),
             port_mappings=params.get('port_mappings'),
+            traffic_capture=params.get('traffic_capture'),
         )
     
     if 'path' in params:
@@ -61,6 +62,7 @@ def start_container_from_source(file_path: str, app_config: AppConfig = None, **
         'resource_limits': params.get('resource_limits'),
         'meta': params.get('meta'),
         'network': params.get('network'),
+        'traffic_capture': params.get('traffic_capture'),
     }
     return start_from_dockerfile(app_config=app_config, **dockerfile_params)
 
@@ -86,6 +88,7 @@ def start_container_from_source_streaming(file_path: str, app_config: AppConfig 
             min_port=params.get('min_port'),
             max_port=params.get('max_port'),
             port_mappings=params.get('port_mappings'),
+            traffic_capture=params.get('traffic_capture'),
         )
         return
 
@@ -107,5 +110,6 @@ def start_container_from_source_streaming(file_path: str, app_config: AppConfig 
         'resource_limits': params.get('resource_limits'),
         'meta': params.get('meta'),
         'network': params.get('network'),
+        'traffic_capture': params.get('traffic_capture'),
     }
     yield from _start_from_dockerfile_streaming(app_config=app_config, **dockerfile_params)

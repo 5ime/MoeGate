@@ -43,3 +43,6 @@ frontend/dist/
 containers/*
 tests/*
 runtime/*
+# 运行时状态（配额锁、生命周期持久化、取证抓包落盘）
+.moegate/
+captures/

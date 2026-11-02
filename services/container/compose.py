@@ -9,6 +9,7 @@ import yaml
 from config.settings import AppConfig, config as default_config
 from core.exceptions import DockerConnectionError, ImageBuildError, ValidationError
 from infra.docker import ensure_client
+from infra.docker_retry import docker_call
 from services.container.compose_env import apply_compose_service_env
 from services.container.compose_policy import (
     order_compose_services,
@@ -112,6 +113,7 @@ def start_from_compose(
     min_port: Optional[int] = None,
     max_port: Optional[int] = None,
     port_mappings: Optional[List[Tuple[str, int]]] = None,
+    traffic_capture: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """从 Docker Compose 启动容器。"""
     if app_config is None:
@@ -153,6 +155,7 @@ def start_from_compose(
             )
             service["_compose_project_id"] = compose_project_id
             service["_compose_service_name"] = name
+            service["_traffic_capture"] = traffic_capture
 
             network_keys = _extract_service_network_keys(service)
             primary_network = compose_network_map.get(network_keys[0]) if network_keys else None
@@ -195,14 +198,18 @@ def start_from_compose(
                 info["compose_warnings"] = compose_warnings
             data.append(info)
 
-        get_container_manager().consume_reservation(slots=len(containers_to_start))
         return data[0] if len(data) == 1 else data
 
     except Exception:
         rollback_client = ensure_client()
+        manager = get_container_manager()
         for container, _service_name in containers_to_start:
             try:
-                get_container_manager().remove_container(container.id)
+                manager.remove_container(container.id)
+                # 与正常销毁保持一致：清掉到期定时器与生命周期持久化，
+                # 否则 lifecycle.json 与到期堆里会留下幽灵条目
+                manager.cancel_timer(container.id)
+                manager.remove_count(container.id)
                 container.remove(force=True)
             except Exception as container_cleanup_err:
                 logger.warning(
@@ -280,12 +287,15 @@ def create_container_from_service(
         privileged=service.get("privileged") is True,
         cap_add=_normalize_cap_list(service.get("cap_add")),
         cap_drop=_normalize_cap_list(service.get("cap_drop")),
+        traffic_capture=service.get("_traffic_capture"),
     )
 
     container = None
     try:
-        container = client.containers.create(**create_kwargs)
-        container.start()
+        container = docker_call(
+            lambda: client.containers.create(**create_kwargs), label="创建 Compose 服务容器"
+        )
+        docker_call(container.start, label="启动 Compose 服务容器")
 
         for network_name in service.get("_extra_networks", []):
             try:
@@ -334,6 +344,7 @@ def _start_from_compose_streaming(
     min_port: Optional[int] = None,
     max_port: Optional[int] = None,
     port_mappings: Optional[List[Tuple[str, int]]] = None,
+    traffic_capture: Optional[bool] = None,
 ):
     """从 Docker Compose 启动容器（流式版本）。"""
     if app_config is None:
@@ -375,6 +386,7 @@ def _start_from_compose_streaming(
             )
             service["_compose_project_id"] = compose_project_id
             service["_compose_service_name"] = name
+            service["_traffic_capture"] = traffic_capture
 
             network_keys = _extract_service_network_keys(service)
             primary_network = compose_network_map.get(network_keys[0]) if network_keys else None
@@ -439,21 +451,29 @@ def _start_from_compose_streaming(
             data.append(info)
 
         yield "所有服务启动完成"
-        get_container_manager().consume_reservation(slots=len(containers_to_start))
         yield data[0] if len(data) == 1 else data
 
-    except Exception:
+    except (GeneratorExit, Exception):
+        # GeneratorExit 不是 Exception 的子类：客户端中断 SSE 时走这一支，
+        # 不接住的话已创建的 service 容器与项目网络会全部变成孤儿。
         rollback_client = ensure_client()
+        manager = get_container_manager()
         for container, _service_name in containers_to_start:
             try:
-                get_container_manager().remove_container(container.id)
+                manager.remove_container(container.id)
+                manager.cancel_timer(container.id)
+                manager.remove_count(container.id)
                 container.remove(force=True)
-            except Exception:
-                pass
+            except Exception as container_cleanup_err:
+                logger.warning(
+                    "Compose 流式回滚容器失败: %s, err=%s",
+                    getattr(container, "id", "unknown"),
+                    container_cleanup_err,
+                )
         if rollback_client:
             for network_name in created_networks:
                 try:
                     rollback_client.networks.get(network_name).remove()
-                except Exception:
-                    pass
+                except Exception as network_cleanup_err:
+                    logger.warning("Compose 流式回滚网络失败: %s, err=%s", network_name, network_cleanup_err)
         raise

@@ -90,6 +90,10 @@ def cleanup_existing_container(client, container_name: str):
         existing.remove()
     except docker.errors.NotFound:
         pass
+    except docker.errors.APIError as exc:
+        # 清理是尽力而为：失败时不要掩盖后续 create 的真实报错，
+        # 但也别把 409/500 直接抛成创建失败，让它落到真正的冲突提示上。
+        logger.warning("清理同名容器 %s 失败: %s", container_name, exc)
 
 
 def build_container_create_kwargs(
@@ -109,6 +113,7 @@ def build_container_create_kwargs(
     privileged: bool = False,
     cap_add: Optional[List[str]] = None,
     cap_drop: Optional[List[str]] = None,
+    traffic_capture: Optional[bool] = None,
 ) -> Dict[str, Any]:
     """构建容器创建参数字典（公共函数）
     
@@ -136,6 +141,13 @@ def build_container_create_kwargs(
     if extra_labels:
         labels.update(extra_labels)
     labels.update(build_creation_meta_labels(creation_meta))
+
+    if traffic_capture is not None:
+        # 标签不可变：落到容器上作为"这台靶机要不要抓包"的持久策略，
+        # sidecar 重启 / MoeGate 重启 reconcile 时都以它为准。
+        from services.container.tap import TAP_DECISION_LABEL, policy_label_value
+
+        labels[TAP_DECISION_LABEL] = policy_label_value(bool(traffic_capture))
 
     create_kwargs = {
         "image": image,
