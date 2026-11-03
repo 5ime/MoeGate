@@ -113,7 +113,7 @@ watch(
         </SectionCard>
 
         <div
-          v-if="status?.hint"
+          v-if="status?.hint && captureEnabled"
           class="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs leading-5 text-amber-800"
         >
           {{ status.hint }}
