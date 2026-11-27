@@ -113,6 +113,23 @@ jobs:
             fi
           done
 
+      - name: Compose release body
+        if: inputs.create_release
+        env:
+          PUBLISH_IMAGE: ${{ inputs.publish_image }}
+          IMAGE: ${{ steps.image.outputs.name }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          {
+            # 只在真正推送镜像时才写 Docker 段：否则发布页会指向一个不存在的标签
+            if [ "$PUBLISH_IMAGE" = "true" ]; then
+              printf '## Docker\n\n```bash\ndocker pull %s:%s\n```\n\n' "$IMAGE" "$VERSION"
+              printf '或在 `docker-compose.yml` 中将 `image` 改为：\n\n```yaml\nimage: %s:%s\n```\n\n' "$IMAGE" "$VERSION"
+            fi
+          } > "$RUNNER_TEMP/body.md"
+          echo "--- release body ---"
+          cat "$RUNNER_TEMP/body.md"
+
       - name: Create GitHub Release
         if: inputs.create_release
         uses: softprops/action-gh-release@v3
@@ -120,15 +137,4 @@ jobs:
           tag_name: ${{ steps.release.outputs.tag }}
           name: MoeGate ${{ steps.release.outputs.tag }}
           generate_release_notes: true
-          body: |
-            ## Docker
-
-            ```bash
-            docker pull ${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}
-            ```
-
-            或在 `docker-compose.yml` 中将 `image` 改为：
-
-            ```yaml
-            image: ${{ steps.image.outputs.name }}:${{ steps.release.outputs.version }}
-            ```
+          body_path: ${{ runner.temp }}/body.md
