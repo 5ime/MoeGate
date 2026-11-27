@@ -123,6 +123,21 @@ def collect_risky_compose_fields(services: Dict[str, Any]) -> List[str]:
                     f"服务 {service_name}: cap_add 含高危能力 {', '.join(sorted(set(dangerous)))}"
                 )
 
+        restart = str(service.get("restart") or "").strip()
+        if restart and restart.lower() != "no":
+            warnings.append(
+                f"服务 {service_name}: restart={restart} 被忽略（MoeGate 固定 no，进程退出不会自愈）"
+            )
+
+        for port_item in service.get("ports") or []:
+            if isinstance(port_item, str) and ":" in port_item:
+                host_part = port_item.split(":", 1)[0].strip()
+                if host_part.isdigit():
+                    warnings.append(
+                        f"服务 {service_name}: 端口映射 {port_item} 的宿主端口被忽略，改由平台随机分配"
+                    )
+                    break
+
     return warnings
 
 

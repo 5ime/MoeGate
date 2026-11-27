@@ -266,6 +266,22 @@ def _is_managed_external_network(client, name: str) -> bool:
     return False
 
 
+def build_compose_network_kwargs(cfg: Dict[str, Any], compose_project_id: str) -> Dict[str, Any]:
+    """构造创建 Compose 网络的基础参数。"""
+    driver = str(cfg.get("driver") or "bridge")
+    kwargs: Dict[str, Any] = {
+        "driver": driver,
+        "attachable": bool(cfg.get("attachable", False)),
+        "labels": {
+            "moegate.managed": "true",
+            "moegate.compose_project_id": compose_project_id,
+        },
+    }
+    if cfg.get("internal"):
+        kwargs["internal"] = True
+    return kwargs
+
+
 def create_compose_network(
     client,
     resolved_name: str,
@@ -276,14 +292,7 @@ def create_compose_network(
 ):
     """创建 Compose 网络，支持在子网冲突时自动换段重试。"""
     driver = str(cfg.get("driver") or "bridge")
-    base_create_kwargs = {
-        "driver": driver,
-        "attachable": bool(cfg.get("attachable", False)),
-        "labels": {
-            "moegate.managed": "true",
-            "moegate.compose_project_id": compose_project_id,
-        },
-    }
+    base_create_kwargs = build_compose_network_kwargs(cfg, compose_project_id)
 
     explicit_ipam = extract_compose_network_ipam(cfg)
     if explicit_ipam is not None:

@@ -9,6 +9,41 @@ from core.exceptions import ValidationError
 _COMPOSE_VAR_PATTERN = re.compile(r"\$\{([^}]+)\}")
 
 
+def _scan_expressions(text: str):
+    """扫描 `${...}`，返回 (start, end, expression)。"""
+    index = 0
+    length = len(text)
+    while index < length:
+        start = text.find("${", index)
+        if start < 0:
+            return
+        depth = 0
+        cursor = start + 2
+        while cursor < length:
+            char = text[cursor]
+            if char == "{":
+                depth += 1
+            elif char == "}":
+                if depth == 0:
+                    yield start, cursor, text[start + 2 : cursor]
+                    index = cursor + 1
+                    break
+                depth -= 1
+            cursor += 1
+        else:
+            return
+
+
+def parse_var_expression(expression: str) -> tuple:
+    """拆分 ${VAR} / ${VAR:-default}，返回 (变量名, 默认值, 是否有默认值)。"""
+    text = str(expression or "").strip()
+    for separator in (":-", "-"):
+        if separator in text:
+            name, default = text.split(separator, 1)
+            return name.strip(), default, True
+    return text, "", False
+
+
 def parse_service_environment(service_env: Any) -> Dict[str, str]:
     """将 compose service.environment 规范化为字符串字典。"""
     if isinstance(service_env, list):
@@ -24,15 +59,41 @@ def parse_service_environment(service_env: Any) -> Dict[str, str]:
 
 
 def substitute_compose_vars(value: str, context: Dict[str, str]) -> str:
-    """替换 compose 中的 ${VAR} 占位符。"""
-
-    def replacer(match: re.Match) -> str:
-        var_name = match.group(1).strip()
+    """替换 compose 中的 ${VAR} / ${VAR:-default} 占位符。"""
+    text = str(value or "")
+    pieces = []
+    cursor = 0
+    for start, end, expression in _scan_expressions(text):
+        var_name, default, has_default = parse_var_expression(expression)
         if var_name in context:
-            return context[var_name]
-        return match.group(0)
+            replacement = context[var_name]
+        elif has_default:
+            replacement = default
+        else:
+            continue
+        pieces.append(text[cursor:start])
+        pieces.append(replacement)
+        cursor = end + 1
+    pieces.append(text[cursor:])
+    return "".join(pieces)
 
-    return _COMPOSE_VAR_PATTERN.sub(replacer, value)
+
+def expression_default_for(value: str, name: str) -> Optional[str]:
+    """若 value 恰好是 `${name:-default}` 形式，返回 default，否则 None。"""
+    text = str(value or "").strip()
+    match = _COMPOSE_VAR_PATTERN.fullmatch(text)
+    if not match:
+        for start, end, expression in _scan_expressions(text):
+            if start == 0 and end == len(text) - 1:
+                var_name, default, has_default = parse_var_expression(expression)
+                if var_name == name and has_default:
+                    return default
+                return None
+        return None
+    var_name, default, has_default = parse_var_expression(match.group(1))
+    if var_name == name and has_default:
+        return default
+    return None
 
 
 def substitute_compose_value(value: Any, context: Dict[str, str]) -> Any:
@@ -48,8 +109,8 @@ def collect_compose_var_references(value: Any) -> Set[str]:
     """收集字符串或 command 列表中的 ${VAR} 占位符名称。"""
     refs: Set[str] = set()
     if isinstance(value, str):
-        for match in _COMPOSE_VAR_PATTERN.finditer(value):
-            name = match.group(1).strip()
+        for _start, _end, expression in _scan_expressions(value):
+            name, _default, _has_default = parse_var_expression(expression)
             if name:
                 refs.add(name)
     elif isinstance(value, list):
@@ -115,13 +176,15 @@ def resolve_compose_service_env(
     for var_name in referenced_vars:
         current = merged_env.get(var_name, "")
         if var_name == "FLAG" and (not current or f"${{{var_name}}}" in current):
-            merged_env[var_name] = generate_service_flag()
+            if expression_default_for(current, var_name) is None:
+                merged_env[var_name] = generate_service_flag()
     context = {str(key): str(value) for key, value in merged_env.items()}
     for _ in range(10):
         changed = False
         resolved: Dict[str, str] = {}
         for key, value in context.items():
-            new_value = substitute_compose_vars(value, context)
+            scoped = {name: other for name, other in context.items() if name != key}
+            new_value = substitute_compose_vars(value, scoped)
             resolved[key] = new_value
             if new_value != value:
                 changed = True
