@@ -28,8 +28,11 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   moegate:
-    volumes: !reset
-      - moegate-data:/data/containers
+    # Compose v5：volumes !reset 会丢挂载，必须用 !override 完整覆盖
+    volumes: !override
+      - moegate-data:${ALLOWED_BASE_DIR:-/data/containers}
+      # 与根 compose 一致：取证卷必须保留，且 name=moegate-captures
+      - moegate-captures:${TRAFFIC_CAPTURE_DIR:-/data/captures}
     environment:
       DOCKER_HOST: tcp://docker-socket-proxy:2375
     depends_on:

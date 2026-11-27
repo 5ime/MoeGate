@@ -16,7 +16,7 @@ docker compose -f docker-compose.yml -f deploy/compose/socket-proxy.example.yml 
 |------|------|
 | [socket-proxy.example.yml](./socket-proxy.example.yml) | 叠加片段，覆盖 `moegate` 的 `volumes` / `environment` / `depends_on` |
 
-**要求 Docker Compose v2.24+**：叠加文件对 `moegate.volumes` 使用 `!reset`，用于移除根 `docker-compose.yml` 中的 `/var/run/docker.sock` 挂载。
+**要求 Docker Compose v2.24+**：叠加文件对 `moegate.volumes` 使用 `!override`，完整覆盖挂载列表以去掉 `/var/run/docker.sock`（Compose v5 上 `!reset` 可能导致 volumes 丢失，勿用）。
 
 ## FRP 同机部署
 

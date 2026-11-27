@@ -148,7 +148,7 @@ gunicorn -w 1 -k gthread --threads 8 -b 0.0.0.0:8080 --timeout 120 app:app
 docker compose -f docker-compose.yml -f deploy/compose/socket-proxy.example.yml up -d --build
 ```
 
-该方案通过 [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) 禁止 `exec`、`swarm` 等端点，并将 MoeGate 的 `DOCKER_HOST` 指向代理；叠加文件使用 `volumes: !reset` 移除 MoeGate 对 `docker.sock` 的直接挂载。可按需调整代理环境变量；**不能**替代网络隔离与强密钥。
+该方案通过 [Tecnativa/docker-socket-proxy](https://github.com/Tecnativa/docker-socket-proxy) 禁止 `exec`、`swarm` 等端点，并将 MoeGate 的 `DOCKER_HOST` 指向代理；叠加文件使用 `volumes: !override` 覆盖挂载列表以移除 `docker.sock`（Compose v5 上勿用 `!reset`，会丢 volumes）。可按需调整代理环境变量；**不能**替代网络隔离与强密钥。
 
 更多叠加示例见 [deploy/compose/README.md](../deploy/compose/README.md)。
 
